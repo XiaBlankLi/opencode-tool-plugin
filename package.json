@@ -1,0 +1,25 @@
+{
+    "contributes":  {
+                        "commands":  [
+                                         {
+                                             "command":  "miku.openRight",
+                                             "title":  "OpenCode工具插件：打开侧栏"
+                                         }
+                                     ]
+                    },
+    "description":  "opencode 开启时右侧面板常驻展示会话状态、历史对话与媒体播放",
+    "version":  "0.0.1",
+    "activationEvents":  [
+                             "*"
+                         ],
+    "engines":  {
+                    "vscode":  "^1.75.0"
+                },
+    "name":  "opencode-tool-plugin",
+    "main":  "./extension.js",
+    "publisher":  "xiali",
+    "categories":  [
+                       "Other"
+                   ],
+    "displayName":  "OpenCode工具插件"
+}

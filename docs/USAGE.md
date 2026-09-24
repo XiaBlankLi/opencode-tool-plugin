@@ -1,0 +1,65 @@
+# 使用手册
+
+## 打开面板
+
+- 方式一：命令面板（`Ctrl+Shift+P`）执行 **`OpenCode工具插件：打开侧栏`**
+- 方式二：打开任意 `opencode` 终端页签，面板会自动出现
+
+布局：面板固定在最右一列；点击历史会话后，opencode 以**编辑器页签**形式开在面板左侧一列，即 `文件 | opencode | 面板`。插件不会移动或重建你已有的页签。
+
+## 面板区域
+
+### 1. 动画区
+- 顶部轮播显示 `media/` 下的动画 GIF
+- 点击 **prev / next** 切换动画
+
+### 2. 媒体播放器
+- 自动收集 `media/` 目录下的音频文件（`.mp3`/`.wav`）
+- **播放 / 暂停**：点击播放按钮
+- **下一首**：点击切歌按钮
+- **进度条**：显示播放进度，可拖动控制播放位置；进度条按当前歌曲时长自动缩放对齐
+
+### 3. 会话状态区
+实时显示 opencode 当前会话信息，每 5 秒自动刷新：
+
+| 字段 | 说明 |
+| --- | --- |
+| 模型 | 当前使用的模型 |
+| Agent | 当前 Agent |
+| Context tokens | 上下文占用 token 数 |
+| 用量百分比 | 上下文用量进度条 |
+| 花费 | 累计费用 |
+| LSP 状态 | Language Server 状态 |
+
+### 4. 历史对话
+- 列出最近的历史会话（按时间排序）
+- 点击任意会话 → 以 `opencode` 终端页签形式恢复该会话：
+  - 每次点击**新开一个** opencode 页签并恢复到对应会话
+  - 会话跨端恢复：即使在其他终端/机器上开始的会话，也能从此处接续
+
+## 环境变量
+
+| 变量 | 说明 |
+| --- | --- |
+| `OPENCODE_EXE` | 可选。opencode 可执行文件完整路径；未设置时按 `PATH`、npm 全局目录顺序自动查找 |
+
+设置示例（PowerShell）：
+
+```powershell
+[Environment]::SetEnvironmentVariable("OPENCODE_EXE", "C:\path\to\opencode.exe", "User")
+# 修改后需重启 VS Code 生效
+```
+
+## 自定义
+
+- **更换动画**：将 GIF 放入 `media/` 目录并刷新面板
+- **更换音频**：将 `.mp3`/`.wav` 放入 `media/` 目录并刷新面板（注意版权）
+- **更换图标**：替换 `media/icon.svg`
+
+## 常见问题
+
+| 问题 | 处理 |
+| --- | --- |
+| 面板不出现 | 执行命令 `OpenCode工具插件：打开侧栏`；或 Reload Window |
+| 恢复会话无反应 | 确认已安装 opencode CLI，且 `OPENCODE_EXE`/`PATH` 指向正确 |
+| 页签布局错乱 | `Ctrl+Shift+P` → `View: Reset View Locations` → Reload Window |

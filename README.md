@@ -1,0 +1,66 @@
+# OpenCode工具插件 (opencode-tool-plugin)
+
+在 VS Code 中为 [opencode](https://opencode.ai) 提供专用编辑器页签与常驻侧栏，展示实时会话状态、历史对话，并可一键恢复历史会话继续对话。
+
+> 仅用于本地演示与个人使用。插件内含的媒体资源（音频/GIF）版权归原作者所有，请勿用于公开分发。
+
+![许可证](https://img.shields.io/badge/license-MIT-blue)
+![版本](https://img.shields.io/badge/version-0.0.1-brightgreen)
+![VS Code](https://img.shields.io/badge/VS%20Code-%5E1.75.0-007acc)
+
+## 功能特性
+
+- **opencode 专用编辑器页签**：点击历史会话时，opencode 会以编辑器页签形式打开并恢复该会话，不使用底部终端面板
+- **布局友好**：面板固定在最右一列，opencode 页签开在面板左侧一列（`文件 | opencode | 面板`），插件从不搬动、重建你已有的页签
+- **常驻侧栏面板**：
+  - 会话状态实时显示（模型、Agent、Context tokens、用量百分比、花费、LSP 状态）
+  - 历史对话列表，点击即可恢复对应会话
+  - 内置媒体播放器（播放/暂停/下一首、进度条），可播放本地音频
+  - 动画轮播 GIF 背景
+- **状态每 5 秒自动刷新**
+
+## 快速开始
+
+1. 本机已安装 VS Code（≥ 1.75.0）与 [opencode](https://opencode.ai) CLI
+2. 安装插件，详见 [安装手册](docs/INSTALL.md)
+3. 打开一个 opencode 终端，或执行命令 `OpenCode工具插件：打开侧栏`
+4. 在面板点击任意历史会话，opencode 以页签形式恢复对话，详见 [使用手册](docs/USAGE.md)
+
+## 目录结构
+
+```
+opencode-tool-plugin/
+├── extension.js              # 插件主逻辑
+├── package.json              # 插件清单（命令、激活事件）
+├── media/                    # 面板媒体资源（图标、GIF、音频）
+├── docs/
+│   ├── INSTALL.md            # 安装手册
+│   └── USAGE.md              # 使用手册
+└── release/
+    ├── opencode-tool-plugin-0.0.1.vsix    # VSIX 安装包
+    └── OpenCode工具插件安装(2026-09-24).txt # 单文件安装脚本
+```
+
+## 开发与构建
+
+```powershell
+# 修改代码后校验语法
+node --check extension.js
+
+# 打包 VSIX（在仓库根目录执行）
+npx --yes @vscode/vsce package --allow-missing-repository
+```
+
+## 环境变量
+
+| 变量 | 说明 |
+| --- | --- |
+| `OPENCODE_EXE` | 可选。指定 opencode 可执行文件的完整路径。未设置时自动在 `PATH` 与 npm 全局目录中查找。 |
+
+## 许可证
+
+[MIT](LICENSE)
+
+## 版权声明
+
+本项目中的动画与音频仅为本地演示素材，版权归其原作者所有。如需公开分发，请自行替换 `media/` 下的素材。
