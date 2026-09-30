@@ -13,11 +13,13 @@
 - **opencode 专用编辑器页签**：点击历史会话时，opencode 会以编辑器页签形式打开并恢复该会话，不使用底部终端面板
 - **布局友好**：面板固定在最右一列，opencode 页签开在面板左侧一列（`文件 | opencode | 面板`），插件从不搬动、重建你已有的页签
 - **常驻侧栏面板**：
-  - 会话状态实时显示（模型、Agent、Context tokens、用量百分比、花费、LSP 状态）
+  - 会话状态实时显示（模型、Agent、Context tokens、用量百分比、花费、LSP 状态），每 5 秒自动刷新
   - 历史对话列表，点击即可恢复对应会话
+  - **关键内容提取**：一键提取会话中的核心观点与关键词（swift 提取并自动清理临时会话）
+  - **用户笔记**：在面板中记笔记，自动保存到 `~/.opencode-tool-notes.json`
+  - **网易云音乐**：扫码/手机号登录、加载歌单、播放歌曲（需安装 `NeteaseCloudMusicApi` 依赖）
   - 内置媒体播放器（播放/暂停/下一首、进度条），可播放本地音频
   - 动画轮播 GIF 背景
-- **状态每 5 秒自动刷新**
 
 ## 快速开始
 
@@ -31,6 +33,8 @@
 ```
 opencode-tool-plugin/
 ├── extension.js              # 插件主逻辑
+├── ncm.js                    # 网易云音乐（NeteaseCloudMusicApi）封装
+├── .vscodeignore             # 打包排除规则
 ├── package.json              # 插件清单（命令、激活事件）
 ├── media/                    # 面板媒体资源（图标、GIF、音频）
 ├── docs/
@@ -38,7 +42,7 @@ opencode-tool-plugin/
 │   └── USAGE.md              # 使用手册
 └── release/
     ├── opencode-tool-plugin-0.0.1.vsix    # VSIX 安装包
-    └── OpenCode工具插件安装(2026-09-24).txt # 单文件安装脚本
+    └── OpenCode工具插件安装(2026-09-28).txt # 单文件安装脚本
 ```
 
 ## 开发与构建

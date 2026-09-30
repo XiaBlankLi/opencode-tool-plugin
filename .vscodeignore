@@ -1,0 +1,15 @@
+.vscode/**
+.vscode-test/**
+**/*.vsix
+**/*.log
+.gitignore
+*.map
+**/tsconfig.json
+**/*.ts
+docs/**
+.github/**
+CHANGELOG.md
+LICENSE
+README.md
+.ncm-cookie.txt
+node_modules/
