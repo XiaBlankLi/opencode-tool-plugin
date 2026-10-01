@@ -531,13 +531,10 @@ body {
   border-top: 1px solid #2f2f33; margin-top: 2px;
   font-size: 11px; color: #cfcfd6;
 }
-#ncmHead {
-  display: flex; align-items: center; gap: 8px; padding: 5px 10px;
-  cursor: pointer; color: #ec4141; font-weight: bold;
+#ncmWrap .sect {
+  padding: 5px 10px 0; color: #ec4141; font-weight: bold;
 }
-#ncmHead .tgl { margin-left: auto; color: #ec4141; font-weight: normal; }
-#ncmPane { padding: 2px 10px 10px; display: none; }
-#ncmWrap.open #ncmPane { display: block; }
+#ncmPane { padding: 2px 10px 10px; display: block; }
 #ncmLogin {
   display: flex; flex-direction: column; gap: 6px;
 }
@@ -708,7 +705,7 @@ body {
   <button id="srcNcm">网易云歌单</button>
 </div>
 <div id="ncmWrap">
-  <div id="ncmHead">♪ 网易云音乐<span class="tgl">▾ 展开</span></div>
+  <div class="sect">♪ 网易云音乐</div>
   <div id="ncmPane">
     <div id="ncmLogin">
       <div id="ncmUser" style="display:none">
@@ -930,6 +927,9 @@ function setMode(m, keepPos) {
   // 互斥置灰：只用当前来源，另一个不可点
   srcBtnLocal.classList.toggle("dis", mode === "ncm")
   srcBtnNcm.classList.toggle("dis", mode === "local")
+  // 网易云面板仅在网易云模式显示，本地模式隐藏
+  const wrap = document.getElementById("ncmWrap")
+  if (wrap) wrap.style.display = mode === "ncm" ? "flex" : "none"
   // 网易云模式：只隐藏切歌/轮播控制条，图片区保留以正常显示专辑封面
   const bar = document.getElementById("bar")
   if (bar) bar.style.display = mode === "ncm" ? "none" : "flex"
@@ -1078,14 +1078,6 @@ function toast(t) {
   setTimeout(() => { if (statusBodyEl.innerHTML === mark) statusBodyEl.innerHTML = old }, 2000)
 }
 
-ncmWrap.querySelector("#ncmHead").onclick = (ev) => {
-  ev.stopPropagation()
-  ncmWrap.classList.toggle("open")
-  const tgl = ncmWrap.querySelector(".tgl")
-  tgl.textContent = ncmWrap.classList.contains("open") ? "▴ 收起" : "▾ 展开"
-  if (ncmWrap.classList.contains("open")) setMode(mode)
-}
-
 document.getElementById("ncmNewQr").onclick = () => {
   ncmSetMsg("正在生成二维码…")
   vscode.postMessage({ type: "ncm:qrNew" })
@@ -1116,9 +1108,6 @@ document.getElementById("srcLocal").onclick = () => {
   startLocalList()
 }
 document.getElementById("srcNcm").onclick = () => {
-  if (!ncmWrap.classList.contains("open")) ncmWrap.classList.add("open")
-  const tgl = ncmWrap.querySelector(".tgl")
-  if (tgl) tgl.textContent = "▴ 收起"
   setMode("ncm", true)
   if (!ncmUser) ncmSetMsg("请先登录网易云音乐", true)
 }
