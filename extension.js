@@ -360,6 +360,57 @@ async function getContextLimit(modelId, providerId) {
   return modelLimitCache[key]
 }
 
+let modelsCache = { t: 0, list: null }
+
+function parseModelsOutput(s) {
+  const lines = String(s || "").split(/\r?\n/)
+  const starts = []
+  lines.forEach((l, i) => { if (l.trim() === "{") starts.push(i) })
+  const blocks = []
+  for (let i = 0; i < starts.length; i++) {
+    let depth = 0
+    const buf = []
+    for (let j = starts[i]; j < lines.length; j++) {
+      buf.push(lines[j])
+      for (const ch of lines[j]) { if (ch === "{") depth++; else if (ch === "}") depth-- }
+      if (depth === 0) break
+    }
+    blocks.push(buf.join("\n"))
+  }
+  const out = []
+  for (const b of blocks) {
+    try {
+      const o = JSON.parse(b)
+      if (!o || !o.id) continue
+      out.push({
+        id: o.id,
+        providerID: o.providerID || "",
+        name: o.name || o.id,
+        image: !!(o.capabilities && o.capabilities.input && o.capabilities.input.image),
+        video: !!(o.capabilities && o.capabilities.input && o.capabilities.input.video),
+        pdf: !!(o.capabilities && o.capabilities.input && o.capabilities.input.pdf),
+        ctx: (o.limit && o.limit.context) || 0
+      })
+    } catch {}
+  }
+  return out
+}
+
+async function queryModels() {
+  if (modelsCache.list && Date.now() - modelsCache.t < 10 * 60e3) return modelsCache.list
+  try {
+    const { stdout } = await execFileAsync(
+      OPENCODE_EXE,
+      ["models", "--verbose"],
+      { timeout: 25000, windowsHide: true, maxBuffer: 32 * 1024 * 1024 }
+    )
+    modelsCache = { t: Date.now(), list: parseModelsOutput(stdout) }
+    return modelsCache.list
+  } catch {
+    return []
+  }
+}
+
 async function lspEnabled() {
   if (Date.now() - lspCache.t < 60e3) return lspCache.value
   lspCache.t = Date.now()
@@ -427,7 +478,7 @@ function esc(s) {
     .replace(/"/g, "&quot;")
 }
 
-function buildHtml(webview, mediaFiles, sessions, status, audioFiles) {
+function buildHtml(webview, mediaFiles, sessions, status, audioFiles, models) {
   const media = mediaFiles.map((f) => ({
     file: f,
     uri: webview
@@ -446,6 +497,7 @@ function buildHtml(webview, mediaFiles, sessions, status, audioFiles) {
     mapSessions(sessions)
   ).replace(/</g, "\\u003c")
   const statusJson = JSON.stringify(status || null).replace(/</g, "\\u003c")
+  const modelsJson = JSON.stringify(models || []).replace(/</g, "\\u003c")
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -518,12 +570,15 @@ body {
 #sourceSwitch { display: flex; align-items: center; gap: 6px; padding: 5px 10px; flex-wrap: wrap; }
 #sourceSwitch b { color: #69c68a; }
 #sourceSwitch button { background: #3a3d41; color: #fff; border: 1px solid transparent; border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: 11px; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; line-height: 16px; white-space: nowrap; }
-#sourceSwitch button.act { background: #3f8f5f; }
-#sourceSwitch #srcNcm { background: #ec4141; color: #fff; font-weight: bold; border: 1px solid #c33536; }
-#sourceSwitch #srcNcm.act { background: #c33536; }
-#playBtnNcm {
-  background: #3a3d41; color: #fff; border: none; border-radius: 4px;
-  padding: 3px 10px; cursor: pointer; font-size: 11px;
+#sourceSwitch button.act { background: #3f8f5f; color: #fff; font-weight: bold; border: 1px solid #2f6b45; }
+#sourceSwitch #srcNcm.act { background: #ec4141; border: 1px solid #c33536; }
+#sourceSwitch button.dis { opacity: .5; filter: grayscale(70%); }
+#sourceSwitch button#srcLocal.dis { background: #3a3d41; color: #9a9aa2; font-weight: normal; border-color: transparent; }
+#sourceSwitch button#srcNcm.dis { background: #3a3d41; color: #9a9aa2; font-weight: normal; border-color: transparent; }
+#ncmWrap {
+  flex: 0 0 auto; display: flex; flex-direction: column;
+  border-top: 1px solid #2f2f33; margin-top: 0;
+  font-size: 11px; color: #cfcfd6;
 }
 #playBtnNcm:hover { background: #50535a; }
 #progressRow {
@@ -548,6 +603,25 @@ body {
 }
 #status .lbl { color: #69c68a; font-weight: bold; }
 #status .val { color: #ffffff; }
+#models {
+  flex: 0 0 auto; max-height: 150px; overflow-y: auto;
+  font-size: 11px; color: #b8b8c0; background: #101014;
+  border-bottom: 1px solid #3c3c3c;
+  padding: 4px 8px; line-height: 1.7;
+}
+#models .mh { color: #69c68a; font-weight: bold; margin-bottom: 2px; cursor: pointer; user-select: none; display: flex; align-items: center; gap: 5px; }
+#models .mh:hover { color: #8be9c6; }
+#models .mh .arw { display: inline-block; transition: transform .15s; font-size: 9px; color: #8b8b93; }
+#models .mcount { color: #8b8b93; font-weight: normal; font-size: 10px; }
+#models.closed .mh .arw { transform: rotate(-90deg); }
+#models.closed .mbody { display: none; }
+#models .mbody { display: flex; flex-direction: column; }
+#models .mrow { display: flex; align-items: center; gap: 6px; }
+#models .mname { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+#models .mcap { flex: 0 0 auto; display: inline-flex; gap: 3px; font-size: 10px; }
+#models .cap { border: 1px solid #46464c; border-radius: 3px; padding: 0 3px; color: #8b8b93; }
+#models .cap.on { color: #fff; border-color: #69c68a; background: #14332a; }
+#models .cap.off { opacity: .35; }
 #head { display: flex; align-items: center; padding: 4px 8px; font-size: 12px; color: #8be9c6; letter-spacing: 1px; border-bottom: 1px solid #3c3c3c; gap: 6px; }
 #head .tab { background: #3a3d41; color: #fff; border: 1px solid transparent; border-radius: 4px; padding: 2px 10px; cursor: pointer; font-size: 11px; box-sizing: border-box; }
 #head .tab.act { background: #3f8f5f; border: 1px solid #2f6b46; }
@@ -562,6 +636,14 @@ body {
 .item:hover { background: #26262b; }
 .item .t { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .item .ts { flex: 0 0 auto; font-size: 10px; color: #8b8b93; }
+.item .ops { flex: 0 0 auto; display: inline-flex; gap: 4px; opacity: 0; transition: opacity .15s; }
+.item:hover .ops { opacity: 1; }
+.item .op {
+  background: #3a3d41; color: #cfcfd6; border: none; border-radius: 3px;
+  padding: 1px 5px; cursor: pointer; font-size: 10px; line-height: 14px;
+}
+.item .op:hover { background: #50535a; color: #fff; }
+.item .op.danger:hover { background: #c33536; }
 .kpitem {
   display: flex; flex-direction: column; gap: 2px; width: 100%;
   background: transparent; border: none; border-bottom: 1px solid #2f2f33;
@@ -614,6 +696,11 @@ body {
   <input type="range" id="seek" min="0" max="0" step="0.1" value="0">
   <span id="durTime">0:00</span>
 </div>
+<div id="sourceSwitch">
+  <b>音乐来源：</b>
+  <button id="srcLocal" class="act">本地 media</button>
+  <button id="srcNcm">网易云歌单</button>
+</div>
 <div id="ncmWrap">
   <div id="ncmHead">♪ 网易云音乐<span class="tgl">▾ 展开</span></div>
   <div id="ncmPane">
@@ -645,13 +732,9 @@ body {
       <button id="playBtnNcm">▶ 播放歌单</button>
     </div>
   </div>
-  <div id="sourceSwitch">
-    <b>音乐来源：</b>
-    <button id="srcLocal" class="act">本地 media</button>
-    <button id="srcNcm">网易云歌单</button>
-  </div>
 </div>
 <div id="status">♬ 正在读取状态…</div>
+<div id="models" class="closed"><div class="mh"><span class="arw">▼</span>可用模型</div><div class="mbody"><div class="mrow"><span class="mname">加载中…</span></div></div></div>
 <div id="head">
   <button id="tabSess" class="tab act">历史对话</button>
   <button id="tabKp" class="tab">关键内容</button>
@@ -754,6 +837,40 @@ function renderStatus(r) {
 
 renderStatus(${statusJson})
 
+const modelsEl = document.getElementById("models")
+
+modelsEl.addEventListener("click", (e) => {
+  if (e.target.closest(".mh")) modelsEl.classList.toggle("closed")
+})
+
+function renderModels(list) {
+  const arrow = '<span class="arw">▼</span>'
+  const head = '<div class="mh">' + arrow + "可用模型" + (list && list.length ? ' <span class="mcount">(' + list.length + ')</span>' : "") + "</div>"
+  if (!list || !list.length) {
+    modelsEl.innerHTML = head + '<div class="mbody"><div class="mrow"><span class="mname">暂无模型数据</span></div></div>'
+    return
+  }
+  const boxes = []
+  for (const m of list) {
+    const cap = []
+    cap.push('<span class="cap ' + (m.pdf ? "on" : "off") + '" title="' + esc(m.pdf ? "支持 PDF 附件" : "不支持 PDF") + '">PDF</span>')
+    cap.push('<span class="cap ' + (m.image ? "on" : "off") + '" title="' + esc(m.image ? "支持图片输入" : "不支持图片输入") + '">图片</span>')
+    cap.push('<span class="cap ' + (m.video ? "on" : "off") + '" title="' + esc(m.video ? "支持视频输入" : "不支持视频输入") + '">视频</span>')
+    const label = (m.name || m.id) + (m.ctx ? " · " + fmtCtx(m.ctx) : "")
+    boxes.push('<div class="mrow"><span class="mname" title="' + esc(m.id + (m.providerID ? " (" + m.providerID + ")" : "")) + '">' + esc(label) + '</span><span class="mcap">' + cap.join("") + '</span></div>')
+  }
+  modelsEl.innerHTML = head + '<div class="mbody">' + boxes.join("") + "</div>"
+}
+
+function fmtCtx(n) {
+  n = Number(n) || 0
+  if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, "") + "M"
+  if (n >= 1000) return Math.round(n / 1000) + "K"
+  return String(n)
+}
+
+renderModels(${modelsJson})
+
 function show() {
   if (!media.length) {
     pic.removeAttribute("src")
@@ -798,12 +915,20 @@ function setMode(m, keepPos) {
   const srcBtnNcm = document.getElementById("srcNcm")
   srcBtnLocal.classList.toggle("act", mode === "local")
   srcBtnNcm.classList.toggle("act", mode === "ncm")
-  if (mode === "ncm") requestNcmPlaylists()
+  // 互斥置灰：只用当前来源，另一个不可点
+  srcBtnLocal.classList.toggle("dis", mode === "ncm")
+  srcBtnNcm.classList.toggle("dis", mode === "local")
+  // 网易云模式：隐藏图片区与轮播控制条；本地恢复
+  const stage = document.getElementById("stage")
+  const bar = document.getElementById("bar")
+  if (stage) stage.style.display = mode === "ncm" ? "none" : "flex"
+  if (bar) bar.style.display = mode === "ncm" ? "none" : "flex"
+  if (mode === "ncm" && ncmUser) requestNcmPlaylists()
 }
 
 function startLocalList(armOnly) {
   audio.pause()
-  mode = "local"
+  setMode("local")
   currentList = tracks
   ti = 0
   show()
@@ -821,7 +946,7 @@ function startLocalList(armOnly) {
 
 function startNcmList(list) {
   audio.pause()
-  mode = "ncm"
+  setMode("ncm")
   currentList = list || []
   ti = 0
   if (!currentList.length) {
@@ -935,6 +1060,12 @@ function ncmSetMsg(t, isErr) {
   ncmMsg.className = isErr ? "err" : ""
 }
 
+function toast(t) {
+  const old = statusEl.innerHTML
+  statusEl.innerHTML = '<span class="lbl">◆</span> <span class="val">' + esc(t) + "</span>"
+  setTimeout(() => { if (statusEl.innerHTML === '<span class="lbl">◆</span> <span class="val">' + esc(t) + "</span>") statusEl.innerHTML = old }, 2000)
+}
+
 ncmWrap.querySelector("#ncmHead").onclick = (ev) => {
   ev.stopPropagation()
   ncmWrap.classList.toggle("open")
@@ -971,11 +1102,13 @@ document.getElementById("tabPwd").onclick = () => {
 
 document.getElementById("srcLocal").onclick = () => {
   startLocalList()
-  setMode("local", true)
 }
 document.getElementById("srcNcm").onclick = () => {
-  if (!ncmUser) { ncmSetMsg("请先登录网易云", true); return }
+  if (!ncmWrap.classList.contains("open")) ncmWrap.classList.add("open")
+  const tgl = ncmWrap.querySelector(".tgl")
+  if (tgl) tgl.textContent = "▴ 收起"
   setMode("ncm", true)
+  if (!ncmUser) ncmSetMsg("请先登录网易云音乐", true)
 }
 
 document.getElementById("playBtnNcm").onclick = () => {
@@ -1034,6 +1167,20 @@ window.addEventListener("message", (ev) => {
   if (m.type === "sessions") { list = m.items || []; render(list) }
   if (m.type === "reload") show()
   if (m.type === "status") renderStatus(m.data)
+  if (m.type === "models") renderModels(m.list || [])
+  if (m.type === "session:renamed") {
+    const row = list.find((x) => x.id === m.sessionId)
+    if (row) row.title = m.title
+    toast("已重命名：'" + m.title + "'")
+    render(list)
+  }
+  if (m.type === "session:deleted") {
+    list = list.filter((x) => x.id !== m.sessionId)
+    if (kpSessionId === m.sessionId) { kpSessionId = null; kpList = [] }
+    toast("会话已删除")
+    render(list)
+  }
+  if (m.type === "ops:err") toast("操作失败：" + (m.text || ""))
   if (m.type === "ncm:user") { renderNcmUser(m.data); if (m.data && !ncmPlaylists.length) requestNcmPlaylists() }
   if (m.type === "ncm:qr") renderNcmQr(m.data, m.hint)
   if (m.type === "ncm:playlists") renderNcmPlaylists(m.list)
@@ -1108,20 +1255,66 @@ function render(list) {
   }
   sess.innerHTML = ""
   list.forEach((s) => {
-    const b = document.createElement("button")
-    b.className = "item"
+    const row = document.createElement("div")
+    row.className = "item"
     const t = document.createElement("span")
     t.className = "t"
     t.textContent = s.title
+    t.title = (s.dir || "") + " · " + s.id
     const ts = document.createElement("span")
     ts.className = "ts"
     ts.textContent = fmt(s.time)
-    b.appendChild(t)
-    b.appendChild(ts)
-    b.title = (s.dir || "") + " · " + s.id
-    b.onclick = () => vscode.postMessage({ type: "resume", sessionId: s.id, directory: s.dir })
-    sess.appendChild(b)
+    const ops = document.createElement("span")
+    ops.className = "ops"
+    const ren = document.createElement("button")
+    ren.className = "op"
+    ren.textContent = "重命名"
+    ren.title = "重命名会话"
+    ren.onclick = (e) => { e.stopPropagation(); promptRename(s) }
+    const del = document.createElement("button")
+    del.className = "op danger"
+    del.textContent = "删除"
+    del.title = "删除会话"
+    del.onclick = (e) => { e.stopPropagation(); promptDelete(s) }
+    ops.appendChild(ren)
+    ops.appendChild(del)
+    row.appendChild(t)
+    row.appendChild(ts)
+    row.appendChild(ops)
+    row.onclick = () => vscode.postMessage({ type: "resume", sessionId: s.id, directory: s.dir })
+    sess.appendChild(row)
   })
+}
+
+let opsArmed = { t: 0, id: null }
+
+function promptDelete(s) {
+  const now = Date.now()
+  if (opsArmed.id !== "del:" + s.id || now - opsArmed.t > 2500) {
+    opsArmed = { t: now, id: "del:" + s.id }
+    vscode.postMessage({ type: "ops:toast", text: "再次点击「删除」确认删除该会话" })
+    return
+  }
+  opsArmed = { t: 0, id: null }
+  vscode.postMessage({ type: "session:delete", sessionId: s.id })
+}
+
+function promptRename(s) {
+  vscode.postMessage({ type: "session:renamePrompt", sessionId: s.id, current: (s.title || "").trim() })
+}
+
+function copyClipboard(text) {
+  try {
+    const ta = document.createElement("textarea")
+    ta.value = String(text || "")
+    ta.style.position = "fixed"
+    ta.style.opacity = "0"
+    document.body.appendChild(ta)
+    ta.select()
+    ta.setSelectionRange(0, ta.value.length)
+    document.execCommand("copy")
+    document.body.removeChild(ta)
+  } catch {}
 }
 
 let kpSessionId = null
@@ -1146,10 +1339,11 @@ function renderKp(list) {
     ks.textContent = k.summary || ""
     b.appendChild(kn)
     b.appendChild(ks)
-    b.title = "点击把该知识点填入会话输入框"
-    b.onclick = () => {
+    b.title = "点击把该知识点填入会话输入框并复制到剪贴板"
+    b.onclick = async () => {
       const text = (k.name || "知识点 " + (idx + 1)) + "：" + (k.summary || "")
-      sess.innerHTML = '<div id="empty">已发送 → 填入会话输入框，回车即可发出</div>'
+      copyClipboard(text)
+      sess.innerHTML = '<div id="empty">✓ 已复制到剪贴板并填入会话输入框，回车即可发出</div>'
       vscode.postMessage({ type: "kp:input", sessionId: kpSessionId, directory: kpSessionDir, text: text })
       setTimeout(() => { if (getActiveTab() === "kp") renderKp(kpList) }, 2500)
     }
@@ -1356,14 +1550,15 @@ show()
 }
 
 async function finalizeHtml(panel) {
-  const [mediaFiles, sessions, status, audioFiles] = await Promise.all([
+  const [mediaFiles, sessions, status, audioFiles, models] = await Promise.all([
     Promise.resolve(collectMedia()),
     querySessions(),
     queryStatus(),
-    Promise.resolve(collectAudio())
+    Promise.resolve(collectAudio()),
+    queryModels()
   ])
   if (panel && panel.webview) {
-    panel.webview.html = buildHtml(panel.webview, mediaFiles, sessions, status, audioFiles)
+    panel.webview.html = buildHtml(panel.webview, mediaFiles, sessions, status, audioFiles, models)
   }
 }
 
@@ -1411,6 +1606,12 @@ async function openPanel() {
         ss = await querySessions()
       } catch {}
       panel.webview.postMessage({ type: "sessions", items: mapSessions(ss) })
+    } else if (msg.type === "models:request") {
+      let list = []
+      try {
+        list = await queryModels()
+      } catch {}
+      panel.webview.postMessage({ type: "models", list })
     } else if (msg.type === "resume") {
       resumeSession(msg.sessionId, msg.directory)
     } else if (msg.type === "kp:load") {
@@ -1433,6 +1634,33 @@ async function openPanel() {
       }
     } else if (msg.type === "kp:input") {
       inputToSession(msg.sessionId, msg.directory, msg.text)
+    } else if (msg.type === "session:rename") {
+      try {
+        const title = String(msg.title || "").trim().replace(/'/g, "''")
+        if (title) {
+          await runDb("UPDATE session SET title='" + title + "' WHERE id='" + msg.sessionId + "'")
+          panel.webview.postMessage({ type: "session:renamed", sessionId: msg.sessionId, title })
+        }
+      } catch (e) {
+        panel.webview.postMessage({ type: "ops:err", text: (e && e.message) || "重命名失败" })
+      }
+    } else if (msg.type === "session:renamePrompt") {
+      const result = await vscode.window.showInputBox({
+        prompt: "重命名会话",
+        value: msg.current || "",
+        placeHolder: "输入新标题",
+        title: "重命名会话 " + String(msg.sessionId || "").slice(-8)
+      })
+      if (typeof result === "string" && result.trim() && result.trim() !== (msg.current || "")) {
+        panel.webview.postMessage({ type: "session:rename", sessionId: msg.sessionId, title: result.trim() })
+      }
+    } else if (msg.type === "session:delete") {
+      try {
+        await execFileAsync(OPENCODE_EXE, ["session", "delete", msg.sessionId], { timeout: 15000, windowsHide: true })
+        panel.webview.postMessage({ type: "session:deleted", sessionId: msg.sessionId })
+      } catch (e) {
+        panel.webview.postMessage({ type: "ops:err", text: (e && e.message) || "删除失败" })
+      }
     } else if (msg.type === "notes:load") {
       panel.webview.postMessage({ type: "notes:data", notes: notesLoad() })
     } else if (msg.type === "notes:save") {
