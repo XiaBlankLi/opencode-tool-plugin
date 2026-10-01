@@ -889,6 +889,7 @@ function showNcmCover(item) {
   }
   if (item && (item.name || item.artists)) {
     meta.textContent = "♪ " + item.name + (item.artists ? " · " + item.artists : "")
+    trackNameEl.textContent = "♪ " + item.name + (item.artists ? " · " + item.artists : "")
   }
   if (!media.length) meta.textContent = "0 / 0"
 }
@@ -918,10 +919,8 @@ function setMode(m, keepPos) {
   // 互斥置灰：只用当前来源，另一个不可点
   srcBtnLocal.classList.toggle("dis", mode === "ncm")
   srcBtnNcm.classList.toggle("dis", mode === "local")
-  // 网易云模式：隐藏图片区与轮播控制条；本地恢复
-  const stage = document.getElementById("stage")
+  // 网易云模式：只隐藏切歌/轮播控制条，图片区保留以正常显示专辑封面
   const bar = document.getElementById("bar")
-  if (stage) stage.style.display = mode === "ncm" ? "none" : "flex"
   if (bar) bar.style.display = mode === "ncm" ? "none" : "flex"
   if (mode === "ncm" && ncmUser) requestNcmPlaylists()
 }
