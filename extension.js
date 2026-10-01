@@ -599,8 +599,14 @@ body {
   flex: 0 0 auto; margin-top: 8px; max-height: 150px; overflow-y: auto;
   font-size: 11px; color: #9fe8c0; background: #101014;
   border-top: 1px solid #3c3c3c; border-bottom: 1px solid #3c3c3c;
-  padding: 4px 8px; white-space: pre-line; line-height: 1.8;
+  padding: 4px 8px; line-height: 1.8;
 }
+#status .sh { color: #69c68a; font-weight: bold; cursor: pointer; user-select: none; display: flex; align-items: center; gap: 5px; }
+#status .sh:hover { color: #8be9c6; }
+#status .sh .arw { display: inline-block; transition: transform .15s; font-size: 9px; color: #8b8b93; }
+#status.closed .sh .arw { transform: rotate(-90deg); }
+#status.closed .sbody { display: none; }
+#status .sbody { white-space: pre-line; }
 #status .lbl { color: #69c68a; font-weight: bold; }
 #status .val { color: #ffffff; }
 #models {
@@ -733,7 +739,7 @@ body {
     </div>
   </div>
 </div>
-<div id="status">♬ 正在读取状态…</div>
+<div id="status" class="closed"><div class="sh"><span class="arw">▼</span>会话状态</div><div class="sbody">♬ 正在读取状态…</div></div>
 <div id="models" class="closed"><div class="mh"><span class="arw">▼</span>可用模型</div><div class="mbody"><div class="mrow"><span class="mname">加载中…</span></div></div></div>
 <div id="head">
   <button id="tabSess" class="tab act">历史对话</button>
@@ -762,6 +768,7 @@ const pic = document.getElementById("pic")
 const meta = document.getElementById("meta")
 const sess = document.getElementById("sess")
 const statusEl = document.getElementById("status")
+const statusBodyEl = statusEl.querySelector(".sbody")
 const audio = document.getElementById("aud")
 const playPauseBtn = document.getElementById("playPause")
 const trackNameEl = document.getElementById("trackName")
@@ -816,7 +823,7 @@ function esc(s) {
 
 function renderStatus(r) {
   if (!r) {
-    statusEl.innerHTML = '<span class="lbl">Context</span>\\n<span class="val">—</span> tokens\\n<span class="val">—%</span> used\\n<span class="val">$0.00</span> spent\\n<span class="lbl">LSP</span>\\n<span class="val">LSPs are disabled</span>'
+    statusBodyEl.innerHTML = '<span class="lbl">Context</span>\\n<span class="val">—</span> tokens\\n<span class="val">—%</span> used\\n<span class="val">$0.00</span> spent\\n<span class="lbl">LSP</span>\\n<span class="val">LSPs are disabled</span>'
     return
   }
   const ctx = r.t_total || 0
@@ -831,13 +838,17 @@ function renderStatus(r) {
   lines.push('<span class="val">' + (r.lsp ? "LSPs are enabled" : "LSPs are disabled") + "</span>")
   if (r.model) lines.push('<span class="lbl">model ·</span> <span class="val">' + esc(r.model) + "</span>")
   if (r.agent) lines.push('<span class="lbl">agent ·</span> <span class="val">' + esc(r.agent) + "</span>")
-  statusEl.innerHTML = lines.join("\\n")
-  statusEl.title = r.title || ""
+  statusBodyEl.innerHTML = lines.join("\\n")
+  statusBodyEl.title = r.title || ""
 }
 
 renderStatus(${statusJson})
 
 const modelsEl = document.getElementById("models")
+
+statusEl.addEventListener("click", (e) => {
+  if (e.target.closest(".sh")) statusEl.classList.toggle("closed")
+})
 
 modelsEl.addEventListener("click", (e) => {
   if (e.target.closest(".mh")) modelsEl.classList.toggle("closed")
@@ -1060,9 +1071,11 @@ function ncmSetMsg(t, isErr) {
 }
 
 function toast(t) {
-  const old = statusEl.innerHTML
-  statusEl.innerHTML = '<span class="lbl">◆</span> <span class="val">' + esc(t) + "</span>"
-  setTimeout(() => { if (statusEl.innerHTML === '<span class="lbl">◆</span> <span class="val">' + esc(t) + "</span>") statusEl.innerHTML = old }, 2000)
+  const mark = '<span class="lbl">◆</span> <span class="val">' + esc(t) + "</span>"
+  const old = statusBodyEl.innerHTML
+  statusEl.classList.remove("closed")
+  statusBodyEl.innerHTML = mark
+  setTimeout(() => { if (statusBodyEl.innerHTML === mark) statusBodyEl.innerHTML = old }, 2000)
 }
 
 ncmWrap.querySelector("#ncmHead").onclick = (ev) => {
