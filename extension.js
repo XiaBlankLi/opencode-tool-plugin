@@ -281,6 +281,25 @@ function notesSave(list) {
   } catch {}
 }
 
+// ---------- 网易云播放进度持久化 ----------
+const NCM_STATE_FILE = path.join(path.dirname(NOTES_FILE), ".opencode-tool-ncm-state.json")
+
+function ncmStateLoad() {
+  try {
+    const raw = fs.readFileSync(NCM_STATE_FILE, "utf8")
+    const o = JSON.parse(raw)
+    return o && typeof o === "object" ? o : {}
+  } catch {
+    return {}
+  }
+}
+
+function ncmStateSave(o) {
+  try {
+    fs.writeFileSync(NCM_STATE_FILE, JSON.stringify(o || {}), "utf8")
+  } catch {}
+}
+
 function httpGetOk(url, timeoutMs) {
   return new Promise((resolve) => {
     const req = http.get(url, { timeout: timeoutMs || 2500 }, (res) => {
@@ -761,6 +780,10 @@ let ncmQrKey = null
 let ncmQrTimer = null
 let ncmUser = null
 let ncmReqSeq = 0
+let ncmPendingResume = null
+let ncmSavedPlaylist = ""
+let ncmSaveTimer = null
+let ncmAutoRestore = false
 const pic = document.getElementById("pic")
 const meta = document.getElementById("meta")
 const sess = document.getElementById("sess")
@@ -797,7 +820,15 @@ function updateSeek() {
   audio.addEventListener(ev, updateSeek)
 )
 audio.addEventListener("play", () => { playPauseBtn.textContent = "⏸ 暂停" })
-audio.addEventListener("pause", () => { playPauseBtn.textContent = "▶ 播放" })
+audio.addEventListener("pause", () => {
+  playPauseBtn.textContent = "▶ 播放"
+  if (mode === "ncm") saveNcmState(true)
+})
+audio.addEventListener("ended", () => {
+  if (mode === "ncm") saveNcmState(true)
+})
+setInterval(() => { if (mode === "ncm") saveNcmState(false) }, 5000)
+window.addEventListener("beforeunload", () => { if (mode === "ncm") saveNcmState(true) })
 
 seek.addEventListener("input", () => {
   curTimeEl.textContent = fmtClock(Number(seek.value))
@@ -964,6 +995,14 @@ function startNcmList(list) {
     playPauseBtn.textContent = "▶ 播放"
     return
   }
+  // 若有上次的播放记录，定位到那一首并恢复进度
+  if (ncmPendingResume) {
+    const found = currentList.findIndex((x) => String(x.id) === String(ncmPendingResume.id))
+    if (found >= 0) {
+      playIndex(found)
+      return
+    }
+  }
   playIndex(0)
 }
 
@@ -999,6 +1038,29 @@ function playIndex(idx, noAuto) {
   }
 }
 
+function saveNcmState(immediate) {
+  if (mode !== "ncm") return
+  const it = (currentList || [])[ti]
+  if (!it || !it.id) return
+  clearTimeout(ncmSaveTimer)
+  const doSave = () => {
+    vscode.postMessage({
+      type: "ncm:stateSave",
+      state: {
+        id: it.id,
+        name: it.name || "",
+        artists: it.artists || "",
+        playlistId: ncmSavedPlaylist || "",
+        pos: Math.max(0, Math.floor(audio.currentTime || 0)),
+        dur: Math.floor(audio.duration || 0),
+        savedAt: Date.now()
+      }
+    })
+  }
+  if (immediate) doSave()
+  else ncmSaveTimer = setTimeout(doSave, 4000)
+}
+
 function playNcmUrl(idx, url, notFound, seq) {
   if (seq != null && seq !== ncmReqSeq) return
   const L = currentList
@@ -1013,6 +1075,19 @@ function playNcmUrl(idx, url, notFound, seq) {
   resetSeek()
   trackNameEl.textContent = "➭ " + itemLabel(L[idx])
   showNcmCover(L[idx])
+  const resumeAt = (ncmPendingResume && ncmPendingResume.id === L[idx].id) ? ncmPendingResume.pos : 0
+  ncmPendingResume = null
+  if (resumeAt > 0) {
+    const applyResume = () => {
+      const d = audio.duration
+      if (d && isFinite(d)) audio.currentTime = Math.min(resumeAt, Math.max(0, d - 1))
+      else audio.currentTime = resumeAt
+      updateSeek()
+    }
+    audio.addEventListener("loadedmetadata", applyResume, { once: true })
+    setTimeout(applyResume, 600)
+  }
+  saveNcmState(true)
   const p = audio.play()
   if (p && p.then) p.then(() => { playPauseBtn.textContent = "⏸ 暂停" }).catch(() => {
     audio.addEventListener("error", function stuck() {
@@ -1155,6 +1230,20 @@ function renderNcmPlaylists(list) {
     op.textContent = pl.name + "（" + pl.trackCount + " 首）"
     ncmPlaylistSel.appendChild(op)
   }
+  // 恢复上次播放的歌单选择
+  if (ncmSavedPlaylist) {
+    for (const pl of ncmPlaylists) {
+      if (String(pl.id) === String(ncmSavedPlaylist)) {
+        ncmPlaylistSel.value = String(pl.id)
+        break
+      }
+    }
+  }
+  // 有待恢复的播放记录且歌单已就绪 -> 自动载入以恢复进度
+  if (ncmPendingResume && ncmAutoRestore && ncmPlaylistSel.value) {
+    ncmAutoRestore = false
+    vscode.postMessage({ type: "ncm:loadPlaylist", id: ncmPlaylistSel.value })
+  }
 }
 
 function requestNcmPlaylists() {
@@ -1187,7 +1276,21 @@ window.addEventListener("message", (ev) => {
   if (m.type === "ncm:playlists") renderNcmPlaylists(m.list)
   if (m.type === "ncm:playlistLoaded") {
     ncmSetMsg("歌单已载入，共 " + (m.list ? m.list.length : 0) + " 首")
+    if (ncmPlaylistSel.value) ncmSavedPlaylist = ncmPlaylistSel.value
     startNcmList(m.list || [])
+  }
+  if (m.type === "ncm:state") {
+    const st = m.state || {}
+    if (st.id) {
+      // 距上次播放超过 3 天的记录不再恢复进度
+      if (st.savedAt && Date.now() - st.savedAt < 3 * 24 * 3600 * 1000) {
+        ncmPendingResume = { id: st.id, pos: Number(st.pos) || 0 }
+        ncmAutoRestore = true
+        if (st.playlistId) ncmSavedPlaylist = String(st.playlistId)
+        setMode("ncm")
+        if (ncmPlaylists.length) renderNcmPlaylists(ncmPlaylists)
+      }
+    }
   }
   if (m.type === "ncm:url") playNcmUrl(m.idx, m.url, m.notFound, m.seq)
   if (m.type === "ncm:msg") ncmSetMsg(m.text, m.isErr)
@@ -1208,8 +1311,9 @@ window.addEventListener("message", (ev) => {
   }
 })
 
-// init: probe logged-in state
+// init: probe logged-in state and restore last ncm playback position
 vscode.postMessage({ type: "ncm:status" })
+vscode.postMessage({ type: "ncm:stateLoad" })
 
 document.getElementById("prev").onclick = () => {
   if (!media.length) return
@@ -1666,6 +1770,10 @@ async function openPanel() {
       panel.webview.postMessage({ type: "notes:data", notes: notesLoad() })
     } else if (msg.type === "notes:save") {
       notesSave(msg.notes)
+    } else if (msg.type === "ncm:stateSave") {
+      ncmStateSave(msg.state || {})
+    } else if (msg.type === "ncm:stateLoad") {
+      panel.webview.postMessage({ type: "ncm:state", state: ncmStateLoad() })
     } else if (msg.type === "ncm:status") {
       if (!ncm) {
         panel.webview.postMessage({ type: "ncm:msg", text: "网易云模块缺失（NeteaseCloudMusicApi 未安装）", isErr: true })
