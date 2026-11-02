@@ -645,6 +645,13 @@ body {
 #models .cap.on { color: #fff; border-color: #69c68a; background: #14332a; }
 #models .cap.off { opacity: .35; }
 #head { display: flex; align-items: center; padding: 4px 8px; font-size: 12px; color: #8be9c6; letter-spacing: 1px; border-bottom: 1px solid #3c3c3c; gap: 6px; }
+#newChatRow { flex: 0 0 auto; padding: 6px 8px 2px; }
+#newChat {
+  width: 100%; background: #3f8f5f; color: #fff; border: 1px solid #2f6b46; border-radius: 4px;
+  padding: 5px 10px; cursor: pointer; font-size: 12px; font-weight: bold; letter-spacing: .5px;
+}
+#newChat:hover { background: #47a06b; }
+#newChat:active { background: #357a51; }
 #head .tab { background: #3a3d41; color: #fff; border: 1px solid transparent; border-radius: 4px; padding: 2px 10px; cursor: pointer; font-size: 11px; box-sizing: border-box; }
 #head .tab.act { background: #3f8f5f; border: 1px solid #2f6b46; }
 #head .reload { margin-left: auto; background: none; border: none; color: #8be9c6; cursor: pointer; font-size: 14px; }
@@ -757,6 +764,9 @@ body {
 </div>
 <div id="status" class="closed"><div class="sh"><span class="arw">▼</span>会话状态</div><div class="sbody">♬ 正在读取状态…</div></div>
 <div id="models" class="closed"><div class="mh"><span class="arw">▼</span>可用模型</div><div class="mbody"><div class="mrow"><span class="mname">加载中…</span></div></div></div>
+<div id="newChatRow">
+  <button id="newChat">+ 开启新对话</button>
+</div>
 <div id="head">
   <button id="tabSess" class="tab act">历史对话</button>
   <button id="tabKp" class="tab">关键内容</button>
@@ -1338,6 +1348,10 @@ loopBtn.onclick = () => {
   }
 }
 document.getElementById("reload").onclick = () => vscode.postMessage({ type: "refresh" })
+document.getElementById("newChat").onclick = () => {
+  vscode.postMessage({ type: "session:new" })
+  setTimeout(() => vscode.postMessage({ type: "refresh" }), 1500)
+}
 
 function fmt(ms) {
   if (!ms) return ""
@@ -1719,6 +1733,8 @@ async function openPanel() {
       panel.webview.postMessage({ type: "models", list })
     } else if (msg.type === "resume") {
       resumeSession(msg.sessionId, msg.directory)
+    } else if (msg.type === "session:new") {
+      startNewSession(msg.directory)
     } else if (msg.type === "kp:load") {
       let sessions = []
       try {
@@ -1891,8 +1907,29 @@ async function resumeSession(sessionId, directory) {
   return port
 }
 
-async function isOpencodeTerminal(t, sessionId) {
-  if (/opencode/i.test(t.name || "")) return true
+function startNewSession(directory) {
+  if (!panel) openPanel()
+  const cols = vscode.window.tabGroups.all
+    .map((g) => g.viewColumn)
+    .filter((c) => c && c > 0)
+  const panelCol = panel && panel.viewColumn ? panel.viewColumn : null
+  const rightMost = cols.length ? Math.max.apply(null, cols) : 1
+  const opencodeCol = panelCol != null && panelCol > 1 ? panelCol - 1 : rightMost + 1
+  const port = 30000 + Math.floor(Math.random() * 20000)
+  const exe = '"' + OPENCODE_EXE.replace(/\\/g, "/") + '"'
+  const cmd = (shell === "pwsh" ? "& " : "") + exe + " --port " + port
+  const term = vscode.window.createTerminal({
+    name: "opencode new",
+    cwd: directory || (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0].uri.fsPath),
+    location: { viewColumn: opencodeCol }
+  })
+  term.sendText(cmd)
+  term.show()
+  reconcile()
+  return port
+}
+
+async function isOpencodeTerminal(t, sessionId) {  if (/opencode/i.test(t.name || "")) return true
   try {
     const pid = await t.processId
     if (!pid) return false
