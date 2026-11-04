@@ -660,9 +660,9 @@ body.ncmMode #ncmWrap { display: flex; }
 }
 #curTime, #durTime { font-size: 11px; color: #8b8b93; min-width: 34px; text-align: center; }
 #status {
-  flex: 0 1 auto; margin-top: 8px; max-height: 110px; min-height: 0; overflow-y: auto;
+  flex: 0 0 auto; margin: 0; max-height: none; min-height: 0; overflow: visible;
   font-size: 11px; color: #9fe8c0; background: #101014;
-  border-top: 1px solid #3c3c3c; border-bottom: 1px solid #3c3c3c;
+  border-bottom: 1px solid #3c3c3c;
   padding: 4px 8px; white-space: pre-line; line-height: 1.8;
 }
 #status .lbl { color: #69c68a; font-weight: bold; }
@@ -730,20 +730,32 @@ body.ncmMode #ncmWrap { display: flex; }
 #head .tab { background: #3a3d41; color: #fff; border: 1px solid transparent; border-radius: 4px; padding: 2px 10px; cursor: pointer; font-size: 11px; box-sizing: border-box; }
 #head .tab.act { background: #3f8f5f; border: 1px solid #2f6b46; }
 #head .reload { margin-left: auto; background: none; border: none; color: #8be9c6; cursor: pointer; font-size: 14px; }
-#mediaToggle { background: #3a3d41; color: #fff; border: 1px solid transparent; border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: 11px; white-space: nowrap; }
-#mediaToggle:hover { background: #50535a; }
-body.mediaCollapsed #stage,
-body.mediaCollapsed #bar,
-body.mediaCollapsed #player,
-body.mediaCollapsed #progressRow,
-body.mediaCollapsed #sourceSwitch,
-body.mediaCollapsed #ncmWrap { display: none !important; }
+.area { display: flex; flex-direction: column; flex: 0 1 auto; min-height: 36px; overflow: hidden; }
+.area > .ahead { display: flex; align-items: center; gap: 6px; padding: 3px 8px; background: #16161a; border-bottom: 1px solid #2f2f33; cursor: pointer; user-select: none; font-size: 11px; color: #8be9c6; letter-spacing: 1px; flex: 0 0 auto; }
+.area > .ahead .atitle { flex: 1; font-weight: bold; }
+.area > .ahead .achest { display: inline-block; transition: transform .15s ease; }
+.area.collapsed > .ahead .achest { transform: rotate(-90deg); }
+.area > .abody { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
+.area.collapsed { flex: 0 0 auto; }
+.area.collapsed > .abody { display: none; }
+.gutter { flex: 0 0 6px; cursor: row-resize; background: #141418; border-top: 1px solid #2a2a2e; border-bottom: 1px solid #2a2a2e; position: relative; }
+.gutter::after { content: ""; position: absolute; left: 50%; top: 50%; width: 24px; height: 2px; margin: -1px 0 0 -12px; background: #3a3d41; border-radius: 1px; }
+.gutter:hover, .gutter.drag { background: #3f8f5f; }
+.gutter:hover::after, .gutter.drag::after { background: #fff; }
+.resizing { user-select: none; }
+#tabArea { flex: 1 1 auto; min-height: 120px; overflow: hidden; display: flex; flex-direction: column; }
+#tabArea.collapsed { flex: 0 0 auto; }
+#tabArea.collapsed #sessMsg, #tabArea.collapsed #sess { display: none; }
+#head .tab { user-select: none; }
+#head .tab.dragging { opacity: .4; }
+#tabCollapse { background: none; border: none; color: #8be9c6; cursor: pointer; font-size: 14px; padding: 0 4px; }
+#tabArea.collapsed #tabCollapse { transform: rotate(-90deg); }
 #newSessRow { padding: 6px 8px 2px; }
 #newSess { width: 100%; background: #2f6b46; border: 1px solid #3f8f5f; color: #fff; border-radius: 4px; padding: 5px 0; cursor: pointer; font-size: 12px; }
 #newSess:hover { background: #3f8f5f; }
 #newSess:active { background: #356f4b; }
 #newSess:disabled { opacity: .5; cursor: default; }
-#sess { flex: 1 1 auto; min-height: 160px; overflow-y: auto; padding: 0 8px 8px; }
+#sess { flex: 1 1 auto; min-height: 60px; overflow-y: auto; padding: 0 8px 8px; }
 #empty { color: #777; font-size: 12px; text-align: center; padding: 16px 10px; }
 .item {
   display: flex; align-items: center; gap: 6px; width: 100%;
@@ -842,6 +854,9 @@ body.mediaCollapsed #ncmWrap { display: none !important; }
 </style>
 </head>
 <body>
+<div id="mediaArea" class="area">
+<div class="ahead" id="mediaHead"><span class="atitle">♪ 媒体与播放</span><span class="achest">▾</span></div>
+<div class="abody" id="mediaBody">
 <div id="stage"><img id="pic" alt=""></div>
 <div id="bar">
   <button id="prev">◀</button>
@@ -897,6 +912,12 @@ body.mediaCollapsed #ncmWrap { display: none !important; }
     </div>
   </div>
 </div>
+</div>
+</div>
+<div class="gutter" id="gutterMedia"></div>
+<div id="statusArea" class="area">
+<div class="ahead" id="statusHead"><span class="atitle">◧ 状态栏</span><span class="achest">▾</span></div>
+<div class="abody" id="statusBody">
 <div id="status">♬ 正在读取状态…</div>
 <div id="modelRow">
   <span class="lbl">model</span>
@@ -907,19 +928,24 @@ body.mediaCollapsed #ncmWrap { display: none !important; }
   <span id="modelMsg"></span>
 </div>
 <div id="modelPanel" class="model-panel" hidden></div>
+</div>
+</div>
+<div class="gutter" id="gutterStatus"></div>
+<div id="tabArea">
 <div id="newSessRow">
   <button id="newSess">＋ 开启新会话</button>
 </div>
 <div id="head">
-  <button id="mediaToggle" title="收起/展开音乐与播放器，给对话内容腾出空间">▴ 音乐</button>
   <button id="tabSess" class="tab act">历史对话</button>
   <button id="tabKp" class="tab">关键内容</button>
   <button id="tabNotes" class="tab">用户笔记</button>
   <button id="tabAgent" class="tab">Agent群组</button>
   <span><button class="reload" id="reload">↻ 刷新</button></span>
+  <button id="tabCollapse" title="折叠/展开内容区">▾</button>
 </div>
 <div id="sessMsg"></div>
 <div id="sess"><div id="empty">加载中…</div></div>
+</div>
 <script>
 const vscode = acquireVsCodeApi()
 const media = ${mediaJson}
@@ -1560,21 +1586,131 @@ loopBtn.onclick = () => {
 }
 document.getElementById("reload").onclick = () => vscode.postMessage({ type: "refresh" })
 
-;(function initMediaToggle() {
-  const btn = document.getElementById("mediaToggle")
-  const apply = (collapsed) => {
-    document.body.classList.toggle("mediaCollapsed", collapsed)
-    btn.textContent = collapsed ? "▾ 音乐" : "▴ 音乐"
-    btn.title = collapsed ? "展开音乐与播放器" : "收起音乐与播放器，给对话内容腾出空间"
+;(function initPaneLayout() {
+  const MIN = 40
+  const mediaArea = document.getElementById("mediaArea")
+  const statusArea = document.getElementById("statusArea")
+  const tabArea = document.getElementById("tabArea")
+
+  const setH = (el, px) => { el.style.flex = "0 0 " + px + "px"; el.style.height = px + "px" }
+  const clearH = (el) => { el.style.flex = ""; el.style.height = "" }
+  const restoreH = (area) => {
+    let v = 0
+    try { v = parseInt(localStorage.getItem(area.id + ":h") || "0", 10) } catch {}
+    if (v > 0) setH(area, Math.min(v, window.innerHeight * 0.9))
   }
-  let saved = false
-  try { saved = localStorage.getItem("ocMediaCollapsed") === "1" } catch {}
-  apply(saved)
-  btn.onclick = () => {
-    const next = !document.body.classList.contains("mediaCollapsed")
-    apply(next)
-    try { localStorage.setItem("ocMediaCollapsed", next ? "1" : "0") } catch {}
+  const setupCollapse = (area, key) => {
+    const head = area.querySelector(".ahead")
+    let collapsed = false
+    try { collapsed = localStorage.getItem(key) === "1" } catch {}
+    const apply = (c) => {
+      collapsed = c
+      area.classList.toggle("collapsed", c)
+      if (c) clearH(area); else restoreH(area)
+      try { localStorage.setItem(key, c ? "1" : "0") } catch {}
+    }
+    if (head) head.addEventListener("click", () => apply(!collapsed))
+    apply(collapsed)
   }
+  const setupResize = (area, gutter, other) => {
+    let startY = 0, startH = 0, dragging = false
+    gutter.addEventListener("pointerdown", (e) => {
+      if (area.classList.contains("collapsed")) return
+      dragging = true
+      startY = e.clientY
+      startH = area.getBoundingClientRect().height
+      gutter.classList.add("drag")
+      area.classList.add("resizing")
+      try { gutter.setPointerCapture(e.pointerId) } catch {}
+      e.preventDefault()
+    })
+    gutter.addEventListener("pointermove", (e) => {
+      if (!dragging) return
+      const others = other.getBoundingClientRect().height
+      const max = Math.max(MIN + 10, window.innerHeight - others - 150)
+      let h = startH + (e.clientY - startY)
+      h = Math.max(MIN, Math.min(max, h))
+      setH(area, Math.round(h))
+    })
+    const stop = () => {
+      if (!dragging) return
+      dragging = false
+      gutter.classList.remove("drag")
+      area.classList.remove("resizing")
+      try { localStorage.setItem(area.id + ":h", String(Math.round(area.getBoundingClientRect().height))) } catch {}
+    }
+    gutter.addEventListener("pointerup", stop)
+    gutter.addEventListener("pointercancel", stop)
+  }
+
+  setupCollapse(mediaArea, "ocMediaCollapsed")
+  setupCollapse(statusArea, "ocStatusCollapsed")
+  setupResize(mediaArea, document.getElementById("gutterMedia"), statusArea)
+  setupResize(statusArea, document.getElementById("gutterStatus"), mediaArea)
+
+  const tabBtn = document.getElementById("tabCollapse")
+  let tabCollapsed = false
+  try { tabCollapsed = localStorage.getItem("ocTabCollapsed") === "1" } catch {}
+  const applyTab = (c) => {
+    tabArea.classList.toggle("collapsed", c)
+    tabBtn.textContent = c ? "▸" : "▾"
+    tabBtn.title = c ? "展开内容区" : "折叠内容区"
+    try { localStorage.setItem("ocTabCollapsed", c ? "1" : "0") } catch {}
+  }
+  tabBtn.addEventListener("click", () => { tabCollapsed = !tabCollapsed; applyTab(tabCollapsed) })
+  applyTab(tabCollapsed)
+
+  const head = document.getElementById("head")
+  const reloadSpan = head.querySelector("span")
+  const tabEls = Array.from(head.querySelectorAll(".tab"))
+  let order = []
+  try { order = JSON.parse(localStorage.getItem("ocTabOrder") || "[]") } catch {}
+  if (Array.isArray(order)) {
+    order.forEach((id) => {
+      const el = document.getElementById(id)
+      if (el && el.classList.contains("tab") && el.parentElement === head) head.insertBefore(el, reloadSpan)
+    })
+  }
+  const saveOrder = () => {
+    try { localStorage.setItem("ocTabOrder", JSON.stringify(Array.from(head.querySelectorAll(".tab")).map((el) => el.id))) } catch {}
+  }
+  let dragEl = null
+  const afterEl = (x) => {
+    const els = Array.from(head.querySelectorAll(".tab:not(.dragging)"))
+    let closest = null, closestOff = -Infinity
+    els.forEach((el) => {
+      const box = el.getBoundingClientRect()
+      const off = x - (box.left + box.width / 2)
+      if (off < 0 && off > closestOff) { closestOff = off; closest = el }
+    })
+    return closest
+  }
+  let lastDragEnd = 0
+  head.addEventListener("dragend", () => { lastDragEnd = Date.now() }, true)
+  head.addEventListener("click", (e) => {
+    if (Date.now() - lastDragEnd < 200) { e.stopPropagation(); e.preventDefault() }
+  }, true)
+  tabEls.forEach((t) => {
+    t.draggable = true
+    t.addEventListener("dragstart", (e) => {
+      dragEl = t
+      t.classList.add("dragging")
+      try { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", t.id) } catch {}
+    })
+    t.addEventListener("dragend", () => {
+      t.classList.remove("dragging")
+      dragEl = null
+      saveOrder()
+    })
+  })
+  head.addEventListener("dragover", (e) => {
+    if (!dragEl) return
+    e.preventDefault()
+    const after = afterEl(e.clientX)
+    if (after && after !== dragEl) head.insertBefore(dragEl, after)
+    else if (!after) head.insertBefore(dragEl, reloadSpan)
+  })
+  head.addEventListener("drop", (e) => e.preventDefault())
 })()
 
 const newSessBtn = document.getElementById("newSess")
