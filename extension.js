@@ -56,8 +56,16 @@ const OPENCODE_EXE = resolveOpenCodeExe()
 const SESSIONS_SQL =
   "SELECT s.id AS id, s.title AS title, s.directory AS directory, " +
   "s.time_updated AS time_updated " +
-  "FROM session s WHERE s.time_archived IS NULL AND s.title IS NOT NULL AND s.title != '' " +
+  "FROM session s WHERE s.time_archived IS NULL AND s.parent_id IS NULL AND s.title IS NOT NULL AND s.title != '' " +
   "ORDER BY s.time_updated DESC LIMIT 25"
+
+const AGENT_GROUPS_SQL =
+  "SELECT c.id AS id, c.title AS title, c.directory AS directory, c.time_updated AS time_updated, " +
+  "c.parent_id AS parent_id, c.agent AS agent, " +
+  "p.title AS parent_title, p.directory AS parent_directory, p.agent AS parent_agent " +
+  "FROM session c LEFT JOIN session p ON p.id = c.parent_id " +
+  "WHERE c.parent_id IS NOT NULL AND c.time_archived IS NULL " +
+  "ORDER BY c.time_updated DESC LIMIT 300"
 
 const STATUS_SQL =
   "SELECT s.id AS id, s.title AS title, s.model AS model, s.agent AS agent, " +
@@ -69,14 +77,15 @@ const STATUS_SQL =
   "COALESCE(json_extract(p.data, '$.tokens.cache.write'), s.tokens_cache_write) AS t_cache_write, " +
   "COALESCE(json_extract(p.data, '$.cost'), s.cost) AS cost " +
   "FROM session s " +
-  "LEFT JOIN part p ON p.session_id = s.id AND json_extract(p.data, '$.type') = 'step-finish' " +
-  "AND p.time_updated = (SELECT MAX(time_updated) FROM part WHERE session_id = s.id AND json_extract(data, '$.type') = 'step-finish') " +
+  "LEFT JOIN part p ON p.id = (SELECT p2.id FROM part p2 WHERE p2.session_id = s.id " +
+  "AND json_extract(p2.data, '$.type') = 'step-finish' ORDER BY p2.time_updated DESC LIMIT 1) " +
   "WHERE s.time_archived IS NULL ORDER BY s.time_updated DESC LIMIT 1"
 
 let panel = null
 let reconcileTimer = null
 let statusTimer = null
 let modelLimitCache = {}
+let modelListCache = { t: 0, value: null }
 let lspCache = { t: 0, value: null }
 let ncmQrKey = null
 let ncmQrTimer = null
@@ -135,18 +144,62 @@ function collectAudio() {
   }
 }
 
+async function execDbRows(sql) {
+  const { stdout } = await execFileAsync(
+    OPENCODE_EXE,
+    ["db", sql, "--format", "json"],
+    { timeout: 8000, windowsHide: true }
+  )
+  const rows = JSON.parse(String(stdout || "").trim() || "[]")
+  return Array.isArray(rows) ? rows : []
+}
+
 async function querySessions() {
   try {
-    const { stdout } = await execFileAsync(
-      OPENCODE_EXE,
-      ["db", SESSIONS_SQL, "--format", "json"],
-      { timeout: 8000, windowsHide: true }
-    )
-    const rows = JSON.parse(stdout.trim())
-    return Array.isArray(rows) ? rows : []
+    return await execDbRows(SESSIONS_SQL)
   } catch {
     return []
   }
+}
+
+async function queryAgentSessions() {
+  try {
+    return await execDbRows(AGENT_GROUPS_SQL)
+  } catch {
+    return []
+  }
+}
+
+function sqlLit(s) {
+  return String(s == null ? "" : s).replace(/'/g, "''")
+}
+
+function sqlId(s) {
+  return String(s == null ? "" : s).replace(/[^A-Za-z0-9_-]/g, "")
+}
+
+async function renameSession(sessionId, title) {
+  const sid = sqlId(sessionId)
+  if (!sid) throw new Error("会话 ID 无效")
+  const t = String(title == null ? "" : title).replace(/\s+/g, " ").trim()
+  if (!t) throw new Error("标题不能为空")
+  if (t.length > 200) throw new Error("标题过长（最多 200 字）")
+  await execDbRows("UPDATE session SET title = '" + sqlLit(t) + "' WHERE id = '" + sid + "'")
+  const rows = await execDbRows("SELECT id, title FROM session WHERE id = '" + sid + "'")
+  if (!rows.length) throw new Error("会话不存在，可能已被删除")
+  if (rows[0].title !== t) throw new Error("重命名未生效")
+  return rows[0].title
+}
+
+async function deleteSession(sessionId) {
+  const sid = sqlId(sessionId)
+  if (!sid) throw new Error("会话 ID 无效")
+  const exists = await execDbRows("SELECT id FROM session WHERE id = '" + sid + "'")
+  if (!exists.length) throw new Error("会话不存在，可能已被删除")
+  await execFileAsync(OPENCODE_EXE, ["session", "delete", sid], { timeout: 20000, windowsHide: true })
+  const after = await execDbRows("SELECT id FROM session WHERE id = '" + sid + "'")
+  if (after.length) throw new Error("删除未生效")
+  return true
 }
 
 function mapSessions(sessions) {
@@ -154,7 +207,12 @@ function mapSessions(sessions) {
     id: s.id,
     title: s.title,
     dir: s.directory || "",
-    time: s.time_updated || 0
+    time: s.time_updated || 0,
+    parentId: s.parent_id || "",
+    parentTitle: s.parent_title || "",
+    parentDir: s.parent_directory || "",
+    agent: s.agent || "",
+    parentAgent: s.parent_agent || ""
   }))
 }
 
@@ -281,25 +339,6 @@ function notesSave(list) {
   } catch {}
 }
 
-// ---------- 网易云播放进度持久化 ----------
-const NCM_STATE_FILE = path.join(path.dirname(NOTES_FILE), ".opencode-tool-ncm-state.json")
-
-function ncmStateLoad() {
-  try {
-    const raw = fs.readFileSync(NCM_STATE_FILE, "utf8")
-    const o = JSON.parse(raw)
-    return o && typeof o === "object" ? o : {}
-  } catch {
-    return {}
-  }
-}
-
-function ncmStateSave(o) {
-  try {
-    fs.writeFileSync(NCM_STATE_FILE, JSON.stringify(o || {}), "utf8")
-  } catch {}
-}
-
 function httpGetOk(url, timeoutMs) {
   return new Promise((resolve) => {
     const req = http.get(url, { timeout: timeoutMs || 2500 }, (res) => {
@@ -379,57 +418,6 @@ async function getContextLimit(modelId, providerId) {
   return modelLimitCache[key]
 }
 
-let modelsCache = { t: 0, list: null }
-
-function parseModelsOutput(s) {
-  const lines = String(s || "").split(/\r?\n/)
-  const starts = []
-  lines.forEach((l, i) => { if (l.trim() === "{") starts.push(i) })
-  const blocks = []
-  for (let i = 0; i < starts.length; i++) {
-    let depth = 0
-    const buf = []
-    for (let j = starts[i]; j < lines.length; j++) {
-      buf.push(lines[j])
-      for (const ch of lines[j]) { if (ch === "{") depth++; else if (ch === "}") depth-- }
-      if (depth === 0) break
-    }
-    blocks.push(buf.join("\n"))
-  }
-  const out = []
-  for (const b of blocks) {
-    try {
-      const o = JSON.parse(b)
-      if (!o || !o.id) continue
-      out.push({
-        id: o.id,
-        providerID: o.providerID || "",
-        name: o.name || o.id,
-        image: !!(o.capabilities && o.capabilities.input && o.capabilities.input.image),
-        video: !!(o.capabilities && o.capabilities.input && o.capabilities.input.video),
-        pdf: !!(o.capabilities && o.capabilities.input && o.capabilities.input.pdf),
-        ctx: (o.limit && o.limit.context) || 0
-      })
-    } catch {}
-  }
-  return out
-}
-
-async function queryModels() {
-  if (modelsCache.list && Date.now() - modelsCache.t < 10 * 60e3) return modelsCache.list
-  try {
-    const { stdout } = await execFileAsync(
-      OPENCODE_EXE,
-      ["models", "--verbose"],
-      { timeout: 25000, windowsHide: true, maxBuffer: 32 * 1024 * 1024 }
-    )
-    modelsCache = { t: Date.now(), list: parseModelsOutput(stdout) }
-    return modelsCache.list
-  } catch {
-    return []
-  }
-}
-
 async function lspEnabled() {
   if (Date.now() - lspCache.t < 60e3) return lspCache.value
   lspCache.t = Date.now()
@@ -447,12 +435,68 @@ async function lspEnabled() {
   return lspCache.value
 }
 
+// 扫描运行中的 opencode TUI 进程，取出它们各自带的 --session
+function getRunningTuiSessions() {
+  if (!isWin) return Promise.resolve([])
+  return execFileAsync(
+    "powershell.exe",
+    [
+      "-NoProfile", "-NonInteractive", "-Command",
+      "Get-CimInstance Win32_Process -Filter \"Name='opencode.exe'\" | ForEach-Object { $_.CommandLine }"
+    ],
+    { timeout: 6000, windowsHide: true }
+  )
+    .then((r) => {
+      const out = []
+      const seen = {}
+      for (const cl of String(r.stdout || "").split(/\r?\n/)) {
+        const line = cl.trim()
+        if (!line) continue
+        const m = line.match(/--session\s+(\S+)/)
+        if (!m) continue
+        const id = m[1]
+        if (seen[id]) continue
+        seen[id] = 1
+        out.push(id)
+      }
+      return out
+    })
+    .catch(() => [])
+}
+
+let tuiSessionCache = { t: 0, value: [] }
+
+// 正在运行的 TUI 会话（去重、带短缓存）
+async function liveTuiSessions() {
+  if (tuiSessionCache.t && Date.now() - tuiSessionCache.t < 3e3 && tuiSessionCache.value.length) {
+    return tuiSessionCache.value
+  }
+  const v = await getRunningTuiSessions()
+  tuiSessionCache = { t: Date.now(), value: v }
+  return v
+}
+
 async function queryStatus() {
   try {
+    // 优先用正在运行的 TUI 会话，避免多开时取错会话
+    const live = await liveTuiSessions()
+    let sql = STATUS_SQL
+    if (live.length === 1) {
+      sql = STATUS_SQL.replace(
+        "WHERE s.time_archived IS NULL",
+        "WHERE s.time_archived IS NULL AND s.id = " + JSON.stringify(live[0]).replace(/"/g, "'")
+      )
+    } else if (live.length > 1) {
+      const inList = live.map((x) => JSON.stringify(x).replace(/"/g, "'")).join(",")
+      sql = STATUS_SQL.replace(
+        "WHERE s.time_archived IS NULL",
+        "WHERE s.time_archived IS NULL AND s.id IN (" + inList + ")"
+      )
+    }
     const { stdout } = await execFileAsync(
       OPENCODE_EXE,
-      ["db", STATUS_SQL, "--format", "json"],
-      { timeout: 8000, windowsHide: true }
+      ["db", sql, "--format", "json"],
+      { timeout: 20000, windowsHide: true }
     )
     const row = JSON.parse(stdout.trim())
     if (!Array.isArray(row) || !row.length) return null
@@ -461,6 +505,8 @@ async function queryStatus() {
     try { raw = JSON.parse(r.model) } catch {}
     r.contextLimit = await getContextLimit(raw && raw.id ? raw.id : r.model, raw && raw.providerID ? raw.providerID : "opencode")
     r.lsp = await lspEnabled()
+    r.modelId = (raw && raw.id) || String(r.model || "")
+    r.providerId = (raw && raw.providerID) || "opencode"
     r.model = parseModel(r.model)
     r.t_total = Number(r.t_total) || 0
     r.t_input = Number(r.t_input) || 0
@@ -497,7 +543,7 @@ function esc(s) {
     .replace(/"/g, "&quot;")
 }
 
-function buildHtml(webview, mediaFiles, sessions, status, audioFiles, models) {
+function buildHtml(webview, mediaFiles, sessions, status, audioFiles) {
   const media = mediaFiles.map((f) => ({
     file: f,
     uri: webview
@@ -516,7 +562,6 @@ function buildHtml(webview, mediaFiles, sessions, status, audioFiles, models) {
     mapSessions(sessions)
   ).replace(/</g, "\\u003c")
   const statusJson = JSON.stringify(status || null).replace(/</g, "\\u003c")
-  const modelsJson = JSON.stringify(models || []).replace(/</g, "\\u003c")
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -530,9 +575,10 @@ body {
   font-family: "Microsoft YaHei", system-ui, sans-serif;
   display: flex; flex-direction: column; overflow: hidden;
 }
-#stage { flex: 0 0 auto; display: flex; align-items: center; justify-content: center; padding: 10px 8px 2px; }
-#pic { max-width: 96%; max-height: 240px; border-radius: 8px; box-shadow: 0 2px 12px rgba(0, 0, 0, 0.45); }
+#stage { flex: 0 1 auto; min-height: 0; max-height: 30vh; overflow: hidden; display: flex; align-items: center; justify-content: center; padding: 8px 8px 2px; }
+#pic { max-width: 96%; max-height: min(240px, 26vh); border-radius: 8px; box-shadow: 0 2px 12px rgba(0, 0, 0, 0.45); }
 #bar { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 4px 8px 8px; flex-wrap: wrap; }
+body.ncmMode #bar button { display: none; }
 #bar button { background: #3a3d41; color: #fff; border: none; border-radius: 4px; padding: 3px 10px; cursor: pointer; font-size: 12px; }
 #bar button:hover { background: #50535a; }
 #meta { font-size: 11px; color: #8b8b93; }
@@ -546,14 +592,18 @@ body {
 #trackName { flex: 1; min-width: 0; font-size: 11px; color: #8be9c6; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 #aud { display: none; }
 #ncmWrap {
-  flex: 0 0 auto; display: flex; flex-direction: column;
+  flex: 0 0 auto; display: none; flex-direction: column;
   border-top: 1px solid #2f2f33; margin-top: 2px;
   font-size: 11px; color: #cfcfd6;
 }
-#ncmWrap .sect {
-  padding: 5px 10px 0; color: #ec4141; font-weight: bold;
+body.ncmMode #ncmWrap { display: flex; }
+#ncmHead {
+  display: flex; align-items: center; gap: 8px; padding: 5px 10px;
+  cursor: pointer; color: #ec4141; font-weight: bold;
 }
-#ncmPane { padding: 2px 10px 10px; display: block; }
+#ncmHead .tgl { margin-left: auto; color: #ec4141; font-weight: normal; }
+#ncmPane { padding: 2px 10px 10px; display: none; }
+#ncmWrap.open #ncmPane { display: block; }
 #ncmLogin {
   display: flex; flex-direction: column; gap: 6px;
 }
@@ -586,15 +636,13 @@ body {
 #sourceSwitch { display: flex; align-items: center; gap: 6px; padding: 5px 10px; flex-wrap: wrap; }
 #sourceSwitch b { color: #69c68a; }
 #sourceSwitch button { background: #3a3d41; color: #fff; border: 1px solid transparent; border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: 11px; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; line-height: 16px; white-space: nowrap; }
-#sourceSwitch button.act { background: #3f8f5f; color: #fff; font-weight: bold; border: 1px solid #2f6b45; }
-#sourceSwitch #srcNcm.act { background: #ec4141; border: 1px solid #c33536; }
-#sourceSwitch button.dis { opacity: .5; filter: grayscale(70%); }
-#sourceSwitch button#srcLocal.dis { background: #3a3d41; color: #9a9aa2; font-weight: normal; border-color: transparent; }
-#sourceSwitch button#srcNcm.dis { background: #3a3d41; color: #9a9aa2; font-weight: normal; border-color: transparent; }
-#ncmWrap {
-  flex: 0 0 auto; display: flex; flex-direction: column;
-  border-top: 1px solid #2f2f33; margin-top: 0;
-  font-size: 11px; color: #cfcfd6;
+#sourceSwitch button:hover { background: #50535a; }
+#sourceSwitch button.act { background: #3f8f5f; border-color: #2f6b46; font-weight: bold; }
+#sourceSwitch button.act:hover { background: #4fa36f; }
+#sourceSwitch #srcNcm.act { background: #c33536; border-color: #a02a2b; }
+#playBtnNcm {
+  background: #3a3d41; color: #fff; border: none; border-radius: 4px;
+  padding: 3px 10px; cursor: pointer; font-size: 11px;
 }
 #playBtnNcm:hover { background: #50535a; }
 #progressRow {
@@ -612,67 +660,154 @@ body {
 }
 #curTime, #durTime { font-size: 11px; color: #8b8b93; min-width: 34px; text-align: center; }
 #status {
-  flex: 0 0 auto; margin-top: 8px; max-height: 150px; overflow-y: auto;
+  flex: 0 1 auto; margin-top: 8px; max-height: 110px; min-height: 0; overflow-y: auto;
   font-size: 11px; color: #9fe8c0; background: #101014;
   border-top: 1px solid #3c3c3c; border-bottom: 1px solid #3c3c3c;
-  padding: 4px 8px; line-height: 1.8;
+  padding: 4px 8px; white-space: pre-line; line-height: 1.8;
 }
-#status .sh { color: #69c68a; font-weight: bold; cursor: pointer; user-select: none; display: flex; align-items: center; gap: 5px; }
-#status .sh:hover { color: #8be9c6; }
-#status .sh .arw { display: inline-block; transition: transform .15s; font-size: 9px; color: #8b8b93; }
-#status.closed .sh .arw { transform: rotate(-90deg); }
-#status.closed .sbody { display: none; }
-#status .sbody { white-space: pre-line; }
 #status .lbl { color: #69c68a; font-weight: bold; }
 #status .val { color: #ffffff; }
-#models {
-  flex: 0 0 auto; max-height: 150px; overflow-y: auto;
-  font-size: 11px; color: #b8b8c0; background: #101014;
+#modelRow {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
+  flex-wrap: wrap;
+  padding: 4px 8px; font-size: 11px; color: #9fe8c0; background: #101014;
   border-bottom: 1px solid #3c3c3c;
-  padding: 4px 8px; line-height: 1.7;
 }
-#models .mh { color: #69c68a; font-weight: bold; margin-bottom: 2px; cursor: pointer; user-select: none; display: flex; align-items: center; gap: 5px; }
-#models .mh:hover { color: #8be9c6; }
-#models .mh .arw { display: inline-block; transition: transform .15s; font-size: 9px; color: #8b8b93; }
-#models .mcount { color: #8b8b93; font-weight: normal; font-size: 10px; }
-#models.closed .mh .arw { transform: rotate(-90deg); }
-#models.closed .mbody { display: none; }
-#models .mbody { display: flex; flex-direction: column; }
-#models .mrow { display: flex; align-items: center; gap: 6px; }
-#models .mname { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-#models .mcap { flex: 0 0 auto; display: inline-flex; gap: 3px; font-size: 10px; }
-#models .cap { border: 1px solid #46464c; border-radius: 3px; padding: 0 3px; color: #8b8b93; }
-#models .cap.on { color: #fff; border-color: #69c68a; background: #14332a; }
-#models .cap.off { opacity: .35; }
-#head { display: flex; align-items: center; padding: 4px 8px; font-size: 12px; color: #8be9c6; letter-spacing: 1px; border-bottom: 1px solid #3c3c3c; gap: 6px; }
-#newChatRow { flex: 0 0 auto; padding: 6px 8px 2px; }
-#newChat {
-  width: 100%; background: #3f8f5f; color: #fff; border: 1px solid #2f6b46; border-radius: 4px;
-  padding: 5px 10px; cursor: pointer; font-size: 12px; font-weight: bold; letter-spacing: .5px;
+#modelRow .lbl { color: #69c68a; font-weight: bold; }
+#modelRow select {
+  flex: 1; min-width: 0; background: #101014; color: #e8e8e8;
+  border: 1px solid #3c3c3c; border-radius: 4px; padding: 2px; font-size: 11px;
 }
-#newChat:hover { background: #47a06b; }
-#newChat:active { background: #357a51; }
+#modelRow button {
+  flex: 0 0 auto; background: #3a3d41; color: #fff; border: none;
+  border-radius: 4px; padding: 2px 10px; cursor: pointer; font-size: 11px;
+}
+#modelRow button:hover { background: #50535a; }
+#modelRow button:disabled { opacity: 0.5; cursor: default; }
+#modelToggle.act { background: #3f8f5f; color: #fff; }
+.model-cur { color: #8be9c6; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
+.model-src {
+  font-size: 10px; line-height: 14px; padding: 0 6px; border-radius: 8px;
+  background: #2b2b30; color: #b9b9c2; border: 1px solid #3c3c3c;
+  white-space: nowrap; flex: 0 0 auto;
+}
+.model-src.p-opencode { background: #20302a; color: #8be9c6; border-color: #2f6b46; }
+.model-src.p-opencode-go { background: #1f2937; color: #7fb3ff; border-color: #2f4f7a; }
+.model-src.p-anthropic { background: #302620; color: #e0a86b; border-color: #6b4f2f; }
+.model-src.p-other { background: #261f30; color: #c9a0ff; border-color: #4f3f6b; }
+.mi-src {
+  font-size: 9px; line-height: 13px; padding: 0 4px; border-radius: 7px;
+  background: #2b2b30; color: #9a9aa4; border: 1px solid #34343a;
+  white-space: nowrap; flex: 0 0 auto;
+}
+.mi-src.p-opencode { color: #8be9c6; border-color: #2f6b46; }
+.mi-src.p-opencode-go { color: #7fb3ff; border-color: #2f4f7a; }
+.mi-src.p-anthropic { color: #e0a86b; border-color: #6b4f2f; }
+.mi-src.p-other { color: #c9a0ff; border-color: #4f3f6b; }
+.model-caps { display: flex; gap: 3px; flex: 0 0 auto; }
+.cap {
+  font-size: 10px; line-height: 14px; padding: 0 5px; border-radius: 3px;
+  background: #2d3a4a; color: #6ea8ff; white-space: nowrap;
+}
+.cap.off { background: #2b2b30; color: #5c5c66; }
+.cap.hot { background: #3f4a2d; color: #b6e36a; }
+.model-panel {
+  max-height: 190px; overflow-y: auto; padding: 4px 8px 6px;
+  border-bottom: 1px solid #3c3c3c; background: #1e1e20;
+}
+.model-item {
+  display: flex; align-items: center; gap: 5px; padding: 3px 0;
+  border-bottom: 1px solid #2b2b30; font-size: 11px;
+}
+.model-item:last-child { border-bottom: none; }
+.mi-name { color: #ccc; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1 1 auto; }
+.mi-name .mi-id { color: #6a6a75; font-size: 10px; }
+.model-item.cur .mi-name { color: #8be9c6; }
+.mi-cur { color: #8be9c6; font-size: 10px; flex: 0 0 auto; }
+#modelMsg { color: #8b8b93; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+#modelMsg.err { color: #ff7d7d; }
+#head { display: flex; flex-wrap: wrap; align-items: center; row-gap: 4px; padding: 4px 8px; font-size: 12px; color: #8be9c6; letter-spacing: 1px; border-bottom: 1px solid #3c3c3c; gap: 6px; }
 #head .tab { background: #3a3d41; color: #fff; border: 1px solid transparent; border-radius: 4px; padding: 2px 10px; cursor: pointer; font-size: 11px; box-sizing: border-box; }
 #head .tab.act { background: #3f8f5f; border: 1px solid #2f6b46; }
 #head .reload { margin-left: auto; background: none; border: none; color: #8be9c6; cursor: pointer; font-size: 14px; }
-#sess { flex: 1; overflow-y: auto; padding: 0 8px 8px; }
+#mediaToggle { background: #3a3d41; color: #fff; border: 1px solid transparent; border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: 11px; white-space: nowrap; }
+#mediaToggle:hover { background: #50535a; }
+body.mediaCollapsed #stage,
+body.mediaCollapsed #bar,
+body.mediaCollapsed #player,
+body.mediaCollapsed #progressRow,
+body.mediaCollapsed #sourceSwitch,
+body.mediaCollapsed #ncmWrap { display: none !important; }
+#newSessRow { padding: 6px 8px 2px; }
+#newSess { width: 100%; background: #2f6b46; border: 1px solid #3f8f5f; color: #fff; border-radius: 4px; padding: 5px 0; cursor: pointer; font-size: 12px; }
+#newSess:hover { background: #3f8f5f; }
+#newSess:active { background: #356f4b; }
+#newSess:disabled { opacity: .5; cursor: default; }
+#sess { flex: 1 1 auto; min-height: 160px; overflow-y: auto; padding: 0 8px 8px; }
 #empty { color: #777; font-size: 12px; text-align: center; padding: 16px 10px; }
 .item {
-  display: flex; align-items: center; gap: 8px; width: 100%;
-  background: transparent; border: none; border-bottom: 1px solid #2f2f33;
-  color: #e8e8e8; text-align: left; padding: 7px 4px; cursor: pointer;
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  border-bottom: 1px solid #2f2f33; padding: 7px 4px; box-sizing: border-box;
 }
 .item:hover { background: #26262b; }
+.item .imain {
+  display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
+  background: none; border: none; color: #e8e8e8; text-align: left;
+  padding: 0; margin: 0; cursor: pointer; font: inherit; min-height: 18px;
+}
 .item .t { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .item .ts { flex: 0 0 auto; font-size: 10px; color: #8b8b93; }
-.item .ops { flex: 0 0 auto; display: inline-flex; gap: 4px; opacity: 0; transition: opacity .15s; }
-.item:hover .ops { opacity: 1; }
-.item .op {
-  background: #3a3d41; color: #cfcfd6; border: none; border-radius: 3px;
-  padding: 1px 5px; cursor: pointer; font-size: 10px; line-height: 14px;
+.item .itools { flex: 0 0 auto; display: flex; gap: 4px; align-items: center; opacity: .5; }
+.item:hover .itools, .item:focus-within .itools { opacity: 1; }
+.ibtn {
+  background: #3a3d41; color: #cfcfd6; border: 1px solid #45494e; border-radius: 4px;
+  padding: 1px 6px; font-size: 10px; cursor: pointer; line-height: 15px; white-space: nowrap;
 }
-.item .op:hover { background: #50535a; color: #fff; }
-.item .op.danger:hover { background: #c33536; }
+.ibtn:hover { background: #50535a; }
+.ibtn:disabled { opacity: .5; cursor: default; }
+.ibtn.ok { background: #2f6b46; border-color: #3f8f5f; color: #fff; }
+.ibtn.ok:hover { background: #3f8f5f; }
+.ibtn.del:hover { background: #7a2626; border-color: #a02a2b; }
+.ibtn.danger { background: #c33536; border-color: #a02a2b; color: #fff; font-weight: bold; }
+#sessMsg { font-size: 11px; padding: 0 4px 6px; color: #8be9c6; }
+#sessMsg.err { color: #ff8080; }
+#sessMsg:empty { display: none; }
+.agroup { margin: 2px 0 10px; }
+.aghead {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  background: #22303a; border: 1px solid #2f4f5a; border-radius: 4px;
+  padding: 5px 8px; cursor: pointer; text-align: left;
+  color: #8be9c6; font-size: 12px; box-sizing: border-box;
+}
+.aghead:hover { background: #2a3b47; }
+.aghead .agt { flex: 1 1 auto; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: bold; }
+.aghead .agc { flex: 0 0 auto; font-size: 10px; color: #7fb3a0; }
+.aitem {
+  display: flex; align-items: center; gap: 6px; position: relative;
+  padding: 5px 4px 5px 16px; border-bottom: 1px solid #2b2b30; box-sizing: border-box;
+}
+.aitem::before { content: "└"; position: absolute; left: 4px; color: #4a6b62; font-size: 11px; }
+.aitem:hover { background: #26262b; }
+.aitem .aimain {
+  flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px;
+  background: none; border: none; color: #d8d8de; text-align: left;
+  padding: 0; margin: 0; cursor: pointer; font: inherit; min-height: 18px;
+}
+.aitem .at { flex: 1 1 auto; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.aitem .ats { flex: 0 0 auto; font-size: 10px; color: #8b8b93; }
+.agtag {
+  flex: 0 0 auto; font-size: 9px; line-height: 14px; padding: 0 5px;
+  border-radius: 7px; white-space: nowrap; border: 1px solid #34343a;
+  background: #2b2b30; color: #9a9aa4;
+}
+.agtag.mgr { background: #2d3a4a; color: #7fb3ff; border-color: #2f4f7a; }
+.agtag.sub { background: #2b2b30; color: #9a9aa4; border-color: #34343a; }
+.ieditwrap { display: flex; flex-direction: column; gap: 6px; padding: 10px 4px; align-items: flex-start; }
+.ieditwrap .ilab { font-size: 12px; color: #69c68a; }
+.ieditwrap .irow { display: flex; gap: 6px; align-items: center; width: 100%; }
+.iedit { flex: 1; min-width: 0; background: #101014; color: #e8e8e8; border: 1px solid #3c3c3c; border-radius: 4px; padding: 4px 8px; font-size: 12px; }
+.iedit:focus { outline: none; border-color: #3f8f5f; }
+.ieditwrap .itip { font-size: 10px; color: #8b8b93; }
 .kpitem {
   display: flex; flex-direction: column; gap: 2px; width: 100%;
   background: transparent; border: none; border-bottom: 1px solid #2f2f33;
@@ -731,7 +866,7 @@ body {
   <button id="srcNcm">网易云歌单</button>
 </div>
 <div id="ncmWrap">
-  <div class="sect">♪ 网易云音乐</div>
+  <div id="ncmHead">♪ 网易云音乐<span class="tgl">▾ 展开</span></div>
   <div id="ncmPane">
     <div id="ncmLogin">
       <div id="ncmUser" style="display:none">
@@ -762,22 +897,41 @@ body {
     </div>
   </div>
 </div>
-<div id="status" class="closed"><div class="sh"><span class="arw">▼</span>会话状态</div><div class="sbody">♬ 正在读取状态…</div></div>
-<div id="models" class="closed"><div class="mh"><span class="arw">▼</span>可用模型</div><div class="mbody"><div class="mrow"><span class="mname">加载中…</span></div></div></div>
-<div id="newChatRow">
-  <button id="newChat">+ 开启新对话</button>
+<div id="status">♬ 正在读取状态…</div>
+<div id="modelRow">
+  <span class="lbl">model</span>
+  <span id="modelCurrent" class="model-cur">—</span>
+  <span id="modelSource" class="model-src" hidden></span>
+  <span id="modelCaps" class="model-caps"></span>
+  <button id="modelToggle" class="model-toggle">可用模型 ▾</button>
+  <span id="modelMsg"></span>
+</div>
+<div id="modelPanel" class="model-panel" hidden></div>
+<div id="newSessRow">
+  <button id="newSess">＋ 开启新会话</button>
 </div>
 <div id="head">
+  <button id="mediaToggle" title="收起/展开音乐与播放器，给对话内容腾出空间">▴ 音乐</button>
   <button id="tabSess" class="tab act">历史对话</button>
   <button id="tabKp" class="tab">关键内容</button>
   <button id="tabNotes" class="tab">用户笔记</button>
+  <button id="tabAgent" class="tab">Agent群组</button>
   <span><button class="reload" id="reload">↻ 刷新</button></span>
 </div>
+<div id="sessMsg"></div>
 <div id="sess"><div id="empty">加载中…</div></div>
 <script>
 const vscode = acquireVsCodeApi()
 const media = ${mediaJson}
 let list = ${listJson}
+let activeTab = "sess"
+let sessionsLoaded = true
+let kpSeq = 0
+let sessSeq = 0
+let notesSeq = 0
+let agentSeq = 0
+let agentLoaded = false
+let agentList = []
 const tracks = ${trackJson}
 let i = 0
 let timer = null
@@ -790,15 +944,11 @@ let ncmQrKey = null
 let ncmQrTimer = null
 let ncmUser = null
 let ncmReqSeq = 0
-let ncmPendingResume = null
-let ncmSavedPlaylist = ""
-let ncmSaveTimer = null
-let ncmAutoRestore = false
 const pic = document.getElementById("pic")
 const meta = document.getElementById("meta")
 const sess = document.getElementById("sess")
 const statusEl = document.getElementById("status")
-const statusBodyEl = statusEl.querySelector(".sbody")
+let lastStatus = null
 const audio = document.getElementById("aud")
 const playPauseBtn = document.getElementById("playPause")
 const trackNameEl = document.getElementById("trackName")
@@ -830,15 +980,7 @@ function updateSeek() {
   audio.addEventListener(ev, updateSeek)
 )
 audio.addEventListener("play", () => { playPauseBtn.textContent = "⏸ 暂停" })
-audio.addEventListener("pause", () => {
-  playPauseBtn.textContent = "▶ 播放"
-  if (mode === "ncm") saveNcmState(true)
-})
-audio.addEventListener("ended", () => {
-  if (mode === "ncm") saveNcmState(true)
-})
-setInterval(() => { if (mode === "ncm") saveNcmState(false) }, 5000)
-window.addEventListener("beforeunload", () => { if (mode === "ncm") saveNcmState(true) })
+audio.addEventListener("pause", () => { playPauseBtn.textContent = "▶ 播放" })
 
 seek.addEventListener("input", () => {
   curTimeEl.textContent = fmtClock(Number(seek.value))
@@ -860,8 +1002,9 @@ function esc(s) {
 }
 
 function renderStatus(r) {
+  lastStatus = r || null
   if (!r) {
-    statusBodyEl.innerHTML = '<span class="lbl">Context</span>\\n<span class="val">—</span> tokens\\n<span class="val">—%</span> used\\n<span class="val">$0.00</span> spent\\n<span class="lbl">LSP</span>\\n<span class="val">LSPs are disabled</span>'
+    statusEl.innerHTML = '<span class="lbl">Context</span>\\n<span class="val">—</span> tokens\\n<span class="val">—%</span> used\\n<span class="val">$0.00</span> spent\\n<span class="lbl">LSP</span>\\n<span class="val">LSPs are disabled</span>'
     return
   }
   const ctx = r.t_total || 0
@@ -876,49 +1019,160 @@ function renderStatus(r) {
   lines.push('<span class="val">' + (r.lsp ? "LSPs are enabled" : "LSPs are disabled") + "</span>")
   if (r.model) lines.push('<span class="lbl">model ·</span> <span class="val">' + esc(r.model) + "</span>")
   if (r.agent) lines.push('<span class="lbl">agent ·</span> <span class="val">' + esc(r.agent) + "</span>")
-  statusBodyEl.innerHTML = lines.join("\\n")
-  statusBodyEl.title = r.title || ""
+  statusEl.innerHTML = lines.join("\\n")
+  statusEl.title = r.title || ""
+}
+
+// ---------- 模型信息（只读展示，不提供切换） ----------
+let modelListLoaded = false
+let modelInfoList = []
+const modelCurrent = document.getElementById("modelCurrent")
+const modelSource = document.getElementById("modelSource")
+const modelCaps = document.getElementById("modelCaps")
+const modelPanel = document.getElementById("modelPanel")
+const modelToggle = document.getElementById("modelToggle")
+const modelMsg = document.getElementById("modelMsg")
+
+function setModelMsg(text, isErr) {
+  modelMsg.textContent = text || ""
+  modelMsg.className = isErr ? "err" : ""
+}
+
+function requestModelList() {
+  if (modelListLoaded) return
+  modelListLoaded = true
+  vscode.postMessage({ type: "model:list" })
+}
+
+function capChip(text, on, cls) {
+  const s = document.createElement("span")
+  s.className = "cap" + (on ? (cls ? " " + cls : "") : " off")
+  s.textContent = text
+  return s
+}
+
+function providerKey(p) {
+  const v = String(p || "").toLowerCase()
+  if (v === "opencode") return "p-opencode"
+  if (v === "opencode-go" || v === "opencodego" || v === "opencode_go" || v === "opencode go") return "p-opencode-go"
+  if (v === "anthropic") return "p-anthropic"
+  return "p-other"
+}
+
+function providerLabel(p) {
+  const v = String(p || "")
+  if (v === "opencode-go") return "opencode go"
+  return v || "未知来源"
+}
+
+function sourceBadge(cls, provider) {
+  const s = document.createElement("span")
+  s.className = cls + " " + providerKey(provider)
+  s.textContent = providerLabel(provider)
+  s.title = "模型来源：" + providerLabel(provider)
+  return s
+}
+
+function updateSourceBadge(provider) {
+  if (!modelSource) return
+  if (!provider) {
+    modelSource.hidden = true
+    modelSource.textContent = ""
+    return
+  }
+  modelSource.hidden = false
+  modelSource.className = "model-src " + providerKey(provider)
+  modelSource.textContent = providerLabel(provider)
+  modelSource.title = "模型来源：" + providerLabel(provider)
+}
+
+function renderModelPanel() {
+  modelPanel.innerHTML = ""
+  const cur = currentModelKey()
+  let vcount = 0
+  for (const m of modelInfoList) {
+    const row = document.createElement("div")
+    row.className = "model-item" + (m.provider + "/" + m.model === cur ? " cur" : "")
+    const nm = document.createElement("span")
+    nm.className = "mi-name"
+    nm.textContent = m.name || m.label
+    const id = document.createElement("span")
+    id.className = "mi-id"
+    id.textContent = " " + m.model
+    nm.appendChild(id)
+    row.appendChild(nm)
+    row.appendChild(sourceBadge("mi-src", m.provider))
+    if (m.provider + "/" + m.model === cur) {
+      const c = document.createElement("span")
+      c.className = "mi-cur"
+      c.textContent = "当前"
+      row.appendChild(c)
+    }
+    if (m.image) { vcount++; row.appendChild(capChip("\u{1F441}", true, "hot")) }
+    row.appendChild(capChip("视频", !!m.video))
+    row.appendChild(capChip("PDF", !!m.pdf))
+    row.appendChild(capChip("推理", !!m.reasoning))
+    modelPanel.appendChild(row)
+  }
+  return vcount
+}
+
+function currentModelKey() {
+  const r = lastStatus
+  if (!r || !r.modelId) return ""
+  return (r.providerId || "opencode") + "/" + r.modelId
+}
+
+function findModelByKey(key) {
+  if (!key) return null
+  for (const m of modelInfoList) if (m.provider + "/" + m.model === key) return m
+  return null
+}
+
+function renderModelList(list) {
+  modelInfoList = list || []
+  refreshModelInfo()
+  const vcount = renderModelPanel()
+  const total = modelInfoList.length
+  setModelMsg(
+    !total ? "未取到模型列表"
+    : vcount ? total + " 个可用模型 · " + vcount + " 个支持读图"
+    : total + " 个可用模型",
+    !total
+  )
+}
+
+function refreshModelInfo() {
+  const key = currentModelKey()
+  if (!key) { modelCurrent.textContent = "—"; modelCaps.innerHTML = ""; updateSourceBadge(""); return }
+  const cur = findModelByKey(key)
+  const provider = cur ? cur.provider : key.split("/")[0]
+  modelCurrent.textContent = cur ? (cur.name || cur.label) : ((lastStatus && lastStatus.modelId) || key)
+  updateSourceBadge(provider)
+  modelCaps.innerHTML = ""
+  modelCaps.appendChild(capChip("\u{1F441}读图", cur ? !!cur.image : false, "hot"))
+  modelCaps.appendChild(capChip("视频", cur ? !!cur.video : false))
+  modelCaps.appendChild(capChip("PDF", cur ? !!cur.pdf : false))
+  modelCaps.appendChild(capChip("推理", cur ? !!cur.reasoning : false))
+  modelCaps.appendChild(capChip("工具", cur ? !!cur.toolcall : false))
+}
+
+function syncModelSelection() {
+  refreshModelInfo()
+  if (modelInfoList.length) renderModelPanel()
+}
+
+modelToggle.onclick = () => {
+  const show = modelPanel.hasAttribute("hidden")
+  if (show) modelPanel.removeAttribute("hidden")
+  else modelPanel.setAttribute("hidden", "")
+  modelToggle.className = show ? "model-toggle act" : "model-toggle"
+  modelToggle.textContent = show ? "可用模型 ▴" : "可用模型 ▾"
 }
 
 renderStatus(${statusJson})
-
-const modelsEl = document.getElementById("models")
-
-statusEl.addEventListener("click", (e) => {
-  if (e.target.closest(".sh")) statusEl.classList.toggle("closed")
-})
-
-modelsEl.addEventListener("click", (e) => {
-  if (e.target.closest(".mh")) modelsEl.classList.toggle("closed")
-})
-
-function renderModels(list) {
-  const arrow = '<span class="arw">▼</span>'
-  const head = '<div class="mh">' + arrow + "可用模型" + (list && list.length ? ' <span class="mcount">(' + list.length + ')</span>' : "") + "</div>"
-  if (!list || !list.length) {
-    modelsEl.innerHTML = head + '<div class="mbody"><div class="mrow"><span class="mname">暂无模型数据</span></div></div>'
-    return
-  }
-  const boxes = []
-  for (const m of list) {
-    const cap = []
-    cap.push('<span class="cap ' + (m.pdf ? "on" : "off") + '" title="' + esc(m.pdf ? "支持 PDF 附件" : "不支持 PDF") + '">PDF</span>')
-    cap.push('<span class="cap ' + (m.image ? "on" : "off") + '" title="' + esc(m.image ? "支持图片输入" : "不支持图片输入") + '">图片</span>')
-    cap.push('<span class="cap ' + (m.video ? "on" : "off") + '" title="' + esc(m.video ? "支持视频输入" : "不支持视频输入") + '">视频</span>')
-    const label = (m.name || m.id) + (m.ctx ? " · " + fmtCtx(m.ctx) : "")
-    boxes.push('<div class="mrow"><span class="mname" title="' + esc(m.id + (m.providerID ? " (" + m.providerID + ")" : "")) + '">' + esc(label) + '</span><span class="mcap">' + cap.join("") + '</span></div>')
-  }
-  modelsEl.innerHTML = head + '<div class="mbody">' + boxes.join("") + "</div>"
-}
-
-function fmtCtx(n) {
-  n = Number(n) || 0
-  if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, "") + "M"
-  if (n >= 1000) return Math.round(n / 1000) + "K"
-  return String(n)
-}
-
-renderModels(${modelsJson})
+refreshModelInfo()
+requestModelList()
 
 function show() {
   if (!media.length) {
@@ -938,7 +1192,6 @@ function showNcmCover(item) {
   }
   if (item && (item.name || item.artists)) {
     meta.textContent = "♪ " + item.name + (item.artists ? " · " + item.artists : "")
-    trackNameEl.textContent = "♪ " + item.name + (item.artists ? " · " + item.artists : "")
   }
   if (!media.length) meta.textContent = "0 / 0"
 }
@@ -965,21 +1218,16 @@ function setMode(m, keepPos) {
   const srcBtnNcm = document.getElementById("srcNcm")
   srcBtnLocal.classList.toggle("act", mode === "local")
   srcBtnNcm.classList.toggle("act", mode === "ncm")
-  // 互斥置灰：只用当前来源，另一个不可点
-  srcBtnLocal.classList.toggle("dis", mode === "ncm")
-  srcBtnNcm.classList.toggle("dis", mode === "local")
-  // 网易云面板仅在网易云模式显示，本地模式隐藏
-  const wrap = document.getElementById("ncmWrap")
-  if (wrap) wrap.style.display = mode === "ncm" ? "flex" : "none"
-  // 网易云模式：只隐藏切歌/轮播控制条，图片区保留以正常显示专辑封面
-  const bar = document.getElementById("bar")
-  if (bar) bar.style.display = mode === "ncm" ? "none" : "flex"
-  if (mode === "ncm" && ncmUser) requestNcmPlaylists()
+  document.body.classList.toggle("ncmMode", mode === "ncm")
+  if (mode === "ncm") {
+    setNcmOpen(true)
+    requestNcmPlaylists()
+  }
 }
 
 function startLocalList(armOnly) {
   audio.pause()
-  setMode("local")
+  mode = "local"
   currentList = tracks
   ti = 0
   show()
@@ -997,21 +1245,13 @@ function startLocalList(armOnly) {
 
 function startNcmList(list) {
   audio.pause()
-  setMode("ncm")
+  mode = "ncm"
   currentList = list || []
   ti = 0
   if (!currentList.length) {
     trackNameEl.textContent = "♩ 该歌单为空"
     playPauseBtn.textContent = "▶ 播放"
     return
-  }
-  // 若有上次的播放记录，定位到那一首并恢复进度
-  if (ncmPendingResume) {
-    const found = currentList.findIndex((x) => String(x.id) === String(ncmPendingResume.id))
-    if (found >= 0) {
-      playIndex(found)
-      return
-    }
   }
   playIndex(0)
 }
@@ -1048,29 +1288,6 @@ function playIndex(idx, noAuto) {
   }
 }
 
-function saveNcmState(immediate) {
-  if (mode !== "ncm") return
-  const it = (currentList || [])[ti]
-  if (!it || !it.id) return
-  clearTimeout(ncmSaveTimer)
-  const doSave = () => {
-    vscode.postMessage({
-      type: "ncm:stateSave",
-      state: {
-        id: it.id,
-        name: it.name || "",
-        artists: it.artists || "",
-        playlistId: ncmSavedPlaylist || "",
-        pos: Math.max(0, Math.floor(audio.currentTime || 0)),
-        dur: Math.floor(audio.duration || 0),
-        savedAt: Date.now()
-      }
-    })
-  }
-  if (immediate) doSave()
-  else ncmSaveTimer = setTimeout(doSave, 4000)
-}
-
 function playNcmUrl(idx, url, notFound, seq) {
   if (seq != null && seq !== ncmReqSeq) return
   const L = currentList
@@ -1085,19 +1302,6 @@ function playNcmUrl(idx, url, notFound, seq) {
   resetSeek()
   trackNameEl.textContent = "➭ " + itemLabel(L[idx])
   showNcmCover(L[idx])
-  const resumeAt = (ncmPendingResume && ncmPendingResume.id === L[idx].id) ? ncmPendingResume.pos : 0
-  ncmPendingResume = null
-  if (resumeAt > 0) {
-    const applyResume = () => {
-      const d = audio.duration
-      if (d && isFinite(d)) audio.currentTime = Math.min(resumeAt, Math.max(0, d - 1))
-      else audio.currentTime = resumeAt
-      updateSeek()
-    }
-    audio.addEventListener("loadedmetadata", applyResume, { once: true })
-    setTimeout(applyResume, 600)
-  }
-  saveNcmState(true)
   const p = audio.play()
   if (p && p.then) p.then(() => { playPauseBtn.textContent = "⏸ 暂停" }).catch(() => {
     audio.addEventListener("error", function stuck() {
@@ -1155,12 +1359,16 @@ function ncmSetMsg(t, isErr) {
   ncmMsg.className = isErr ? "err" : ""
 }
 
-function toast(t) {
-  const mark = '<span class="lbl">◆</span> <span class="val">' + esc(t) + "</span>"
-  const old = statusBodyEl.innerHTML
-  statusEl.classList.remove("closed")
-  statusBodyEl.innerHTML = mark
-  setTimeout(() => { if (statusBodyEl.innerHTML === mark) statusBodyEl.innerHTML = old }, 2000)
+function setNcmOpen(open) {
+  ncmWrap.classList.toggle("open", open)
+  const tgl = ncmWrap.querySelector(".tgl")
+  if (tgl) tgl.textContent = open ? "▴ 收起" : "▾ 展开"
+}
+
+ncmWrap.querySelector("#ncmHead").onclick = (ev) => {
+  ev.stopPropagation()
+  setNcmOpen(!ncmWrap.classList.contains("open"))
+  if (ncmWrap.classList.contains("open")) setMode(mode)
 }
 
 document.getElementById("ncmNewQr").onclick = () => {
@@ -1191,10 +1399,11 @@ document.getElementById("tabPwd").onclick = () => {
 
 document.getElementById("srcLocal").onclick = () => {
   startLocalList()
+  setMode("local", true)
 }
 document.getElementById("srcNcm").onclick = () => {
+  if (!ncmUser) { ncmSetMsg("请先登录网易云", true); return }
   setMode("ncm", true)
-  if (!ncmUser) ncmSetMsg("请先登录网易云音乐", true)
 }
 
 document.getElementById("playBtnNcm").onclick = () => {
@@ -1240,20 +1449,6 @@ function renderNcmPlaylists(list) {
     op.textContent = pl.name + "（" + pl.trackCount + " 首）"
     ncmPlaylistSel.appendChild(op)
   }
-  // 恢复上次播放的歌单选择
-  if (ncmSavedPlaylist) {
-    for (const pl of ncmPlaylists) {
-      if (String(pl.id) === String(ncmSavedPlaylist)) {
-        ncmPlaylistSel.value = String(pl.id)
-        break
-      }
-    }
-  }
-  // 有待恢复的播放记录且歌单已就绪 -> 自动载入以恢复进度
-  if (ncmPendingResume && ncmAutoRestore && ncmPlaylistSel.value) {
-    ncmAutoRestore = false
-    vscode.postMessage({ type: "ncm:loadPlaylist", id: ncmPlaylistSel.value })
-  }
 }
 
 function requestNcmPlaylists() {
@@ -1264,66 +1459,82 @@ function requestNcmPlaylists() {
 // ---------- 页面消息处理 ----------
 window.addEventListener("message", (ev) => {
   const m = ev.data
-  if (m.type === "sessions") { list = m.items || []; render(list) }
+  if (m.type === "sessions") {
+    if (m.seq != null && m.seq !== sessSeq) return
+    list = m.items || []
+    sessionsLoaded = true
+    if (isTab("sess")) render(list)
+  }
+  if (m.type === "agent:data") {
+    if (m.seq != null && m.seq !== agentSeq) return
+    agentList = m.items || []
+    agentLoaded = true
+    if (isTab("agent")) renderAgent(agentList)
+  }
+  if (m.type === "sess:done") {
+    const target = list.find((s) => s.id === m.sessionId)
+    if (m.op === "rename") {
+      if (m.ok) {
+        if (target) target.title = m.title
+        editingId = null
+        if (isTab("sess")) render(list)
+        sessFlash("已重命名为「" + (m.title || "") + "」", false)
+      } else {
+        sessFlash("重命名失败：" + (m.error || "未知错误"), true)
+        if (isTab("sess") && editingId === m.sessionId && target) startRename(target)
+      }
+    } else if (m.op === "delete") {
+      if (m.ok) {
+        list = list.filter((s) => s.id !== m.sessionId)
+        editingId = null
+        if (isTab("sess")) render(list)
+        sessFlash("已删除该会话", false)
+      } else {
+        if (isTab("sess")) render(list)
+        sessFlash("删除失败：" + (m.error || "未知错误"), true)
+      }
+    }
+  }
   if (m.type === "reload") show()
-  if (m.type === "status") renderStatus(m.data)
-  if (m.type === "models") renderModels(m.list || [])
-  if (m.type === "session:renamed") {
-    const row = list.find((x) => x.id === m.sessionId)
-    if (row) row.title = m.title
-    toast("已重命名：'" + m.title + "'")
-    render(list)
+  if (m.type === "sess:newed") {
+    const btn = document.getElementById("newSess")
+    if (btn) btn.disabled = false
+    sessFlash(m.ok ? "已在新终端开启新会话" : ("开启新会话失败：" + (m.error || "未知错误")), !m.ok)
   }
-  if (m.type === "session:deleted") {
-    list = list.filter((x) => x.id !== m.sessionId)
-    if (kpSessionId === m.sessionId) { kpSessionId = null; kpList = [] }
-    toast("会话已删除")
-    render(list)
-  }
-  if (m.type === "ops:err") toast("操作失败：" + (m.text || ""))
+  if (m.type === "status") { renderStatus(m.data); syncModelSelection() }
+  if (m.type === "model:data") renderModelList(m.list)
+  if (m.type === "model:msg") setModelMsg(m.text, m.isErr)
   if (m.type === "ncm:user") { renderNcmUser(m.data); if (m.data && !ncmPlaylists.length) requestNcmPlaylists() }
   if (m.type === "ncm:qr") renderNcmQr(m.data, m.hint)
   if (m.type === "ncm:playlists") renderNcmPlaylists(m.list)
   if (m.type === "ncm:playlistLoaded") {
     ncmSetMsg("歌单已载入，共 " + (m.list ? m.list.length : 0) + " 首")
-    if (ncmPlaylistSel.value) ncmSavedPlaylist = ncmPlaylistSel.value
     startNcmList(m.list || [])
-  }
-  if (m.type === "ncm:state") {
-    const st = m.state || {}
-    if (st.id) {
-      // 距上次播放超过 3 天的记录不再恢复进度
-      if (st.savedAt && Date.now() - st.savedAt < 3 * 24 * 3600 * 1000) {
-        ncmPendingResume = { id: st.id, pos: Number(st.pos) || 0 }
-        ncmAutoRestore = true
-        if (st.playlistId) ncmSavedPlaylist = String(st.playlistId)
-        setMode("ncm")
-        if (ncmPlaylists.length) renderNcmPlaylists(ncmPlaylists)
-      }
-    }
   }
   if (m.type === "ncm:url") playNcmUrl(m.idx, m.url, m.notFound, m.seq)
   if (m.type === "ncm:msg") ncmSetMsg(m.text, m.isErr)
   if (m.type === "kp:data") {
+    if (m.seq != null && m.seq !== kpSeq) return
     kpSessionId = m.sessionId
     kpSessionDir = m.directory
     kpList = m.list || []
-    renderKp(kpList)
+    if (isTab("kp")) renderKp(kpList)
   }
   if (m.type === "kp:err") {
-    sess.innerHTML = '<div id="empty">' + esc(m.text || "AI 提取失败") + '</div>'
+    if (m.seq != null && m.seq !== kpSeq) return
+    if (isTab("kp")) sess.innerHTML = '<div id="empty">' + esc(m.text || "AI 提取失败") + '</div>'
   }
   if (m.type === "notes:data") {
+    if (m.seq != null && m.seq !== notesSeq) return
     noteList = m.notes || []
     noteListLoaded = true
     currentNoteId = noteList.length ? noteList[0].id : null
-    renderNotes()
+    if (isTab("notes")) renderNotes()
   }
 })
 
-// init: probe logged-in state and restore last ncm playback position
+// init: probe logged-in state
 vscode.postMessage({ type: "ncm:status" })
-vscode.postMessage({ type: "ncm:stateLoad" })
 
 document.getElementById("prev").onclick = () => {
   if (!media.length) return
@@ -1348,9 +1559,31 @@ loopBtn.onclick = () => {
   }
 }
 document.getElementById("reload").onclick = () => vscode.postMessage({ type: "refresh" })
-document.getElementById("newChat").onclick = () => {
-  vscode.postMessage({ type: "session:new" })
-  setTimeout(() => vscode.postMessage({ type: "refresh" }), 1500)
+
+;(function initMediaToggle() {
+  const btn = document.getElementById("mediaToggle")
+  const apply = (collapsed) => {
+    document.body.classList.toggle("mediaCollapsed", collapsed)
+    btn.textContent = collapsed ? "▾ 音乐" : "▴ 音乐"
+    btn.title = collapsed ? "展开音乐与播放器" : "收起音乐与播放器，给对话内容腾出空间"
+  }
+  let saved = false
+  try { saved = localStorage.getItem("ocMediaCollapsed") === "1" } catch {}
+  apply(saved)
+  btn.onclick = () => {
+    const next = !document.body.classList.contains("mediaCollapsed")
+    apply(next)
+    try { localStorage.setItem("ocMediaCollapsed", next ? "1" : "0") } catch {}
+  }
+})()
+
+const newSessBtn = document.getElementById("newSess")
+newSessBtn.onclick = () => {
+  if (newSessBtn.disabled) return
+  newSessBtn.disabled = true
+  sessFlash("正在开启新会话…", false)
+  vscode.postMessage({ type: "sess:new" })
+  setTimeout(() => { newSessBtn.disabled = false }, 2000)
 }
 
 function fmt(ms) {
@@ -1367,73 +1600,232 @@ function fmt(ms) {
   )
 }
 
+let sessMsgTimer = null
+let editingId = null
+
+function sessFlash(text, isErr) {
+  const el = document.getElementById("sessMsg")
+  if (!el) return
+  el.textContent = text || ""
+  el.className = isErr ? "err" : ""
+  if (sessMsgTimer) clearTimeout(sessMsgTimer)
+  sessMsgTimer = text ? setTimeout(() => { el.textContent = ""; el.className = "" }, 6000) : null
+}
+
+function sessItem(s) {
+  const row = document.createElement("div")
+  row.className = "item"
+  row.dataset.id = s.id
+
+  const main = document.createElement("button")
+  main.className = "imain"
+  const t = document.createElement("span")
+  t.className = "t"
+  t.textContent = s.title || "(无标题)"
+  const ts = document.createElement("span")
+  ts.className = "ts"
+  ts.textContent = fmt(s.time)
+  main.appendChild(t)
+  main.appendChild(ts)
+  main.title = (s.dir || "") + " · " + s.id
+  main.onclick = () => vscode.postMessage({ type: "resume", sessionId: s.id, directory: s.dir })
+
+  const tools = document.createElement("span")
+  tools.className = "itools"
+
+  const ren = document.createElement("button")
+  ren.className = "ibtn"
+  ren.textContent = "重命名"
+  ren.title = "给这条历史对话换个名字"
+  ren.onclick = (e) => {
+    e.stopPropagation()
+    startRename(s)
+  }
+
+  const del = document.createElement("button")
+  del.className = "ibtn del"
+  del.textContent = "删除"
+  del.title = "永久删除这条历史对话（含全部消息，不可撤销）"
+  let armed = false
+  let armTimer = null
+  del.onclick = (e) => {
+    e.stopPropagation()
+    if (!armed) {
+      armed = true
+      del.textContent = "确认删除?"
+      del.className = "ibtn danger"
+      sessFlash("再点一次「确认删除?」将永久删除此会话及其全部消息", true)
+      if (armTimer) clearTimeout(armTimer)
+      armTimer = setTimeout(() => {
+        if (!armed) return
+        armed = false
+        del.textContent = "删除"
+        del.className = "ibtn del"
+      }, 6000)
+      return
+    }
+    armed = false
+    if (armTimer) clearTimeout(armTimer)
+    del.disabled = true
+    ren.disabled = true
+    sessFlash("正在删除…", false)
+    vscode.postMessage({ type: "sess:delete", sessionId: s.id })
+  }
+
+  tools.appendChild(ren)
+  tools.appendChild(del)
+  row.appendChild(main)
+  row.appendChild(tools)
+  return row
+}
+
+function startRename(s) {
+  editingId = s.id
+  const wrap = document.createElement("div")
+  wrap.className = "ieditwrap"
+
+  const lab = document.createElement("div")
+  lab.className = "ilab"
+  lab.textContent = "重命名历史对话"
+
+  const row = document.createElement("div")
+  row.className = "irow"
+  const inp = document.createElement("input")
+  inp.className = "iedit"
+  inp.value = s.title || ""
+  const ok = document.createElement("button")
+  ok.className = "ibtn ok"
+  ok.textContent = "保存"
+  const ca = document.createElement("button")
+  ca.className = "ibtn"
+  ca.textContent = "取消"
+  row.appendChild(inp)
+  row.appendChild(ok)
+  row.appendChild(ca)
+
+  const tip = document.createElement("div")
+  tip.className = "itip"
+  tip.textContent = "回车保存 · Esc 取消 · 原名：" + (s.title || "(无标题)")
+
+  wrap.appendChild(lab)
+  wrap.appendChild(row)
+  wrap.appendChild(tip)
+  sess.innerHTML = ""
+  sess.appendChild(wrap)
+
+  const back = () => { editingId = null; render(list) }
+  const submit = () => {
+    const v = String(inp.value || "").replace(/\s+/g, " ").trim()
+    if (!v) { sessFlash("标题不能为空", true); inp.focus(); return }
+    ok.disabled = true
+    ca.disabled = true
+    sessFlash("正在重命名…", false)
+    vscode.postMessage({ type: "sess:rename", sessionId: s.id, title: v })
+  }
+  ok.onclick = (e) => { e.stopPropagation(); submit() }
+  ca.onclick = (e) => { e.stopPropagation(); back() }
+  inp.onclick = (e) => e.stopPropagation()
+  inp.onkeydown = (e) => {
+    e.stopPropagation()
+    if (e.key === "Enter") { e.preventDefault(); submit() }
+    else if (e.key === "Escape") { e.preventDefault(); back() }
+  }
+  inp.focus()
+  if (inp.select) inp.select()
+}
+
 function render(list) {
+  if (editingId) editingId = null
   if (!list || !list.length) {
     sess.innerHTML = '<div id="empty">还没有历史对话 —— 去 opencode 聊一次吧 ♪</div>'
     return
   }
   sess.innerHTML = ""
   list.forEach((s) => {
-    const row = document.createElement("div")
-    row.className = "item"
-    const t = document.createElement("span")
-    t.className = "t"
-    t.textContent = s.title
-    t.title = (s.dir || "") + " · " + s.id
-    const ts = document.createElement("span")
-    ts.className = "ts"
-    ts.textContent = fmt(s.time)
-    const ops = document.createElement("span")
-    ops.className = "ops"
-    const ren = document.createElement("button")
-    ren.className = "op"
-    ren.textContent = "重命名"
-    ren.title = "重命名会话"
-    ren.onclick = (e) => { e.stopPropagation(); promptRename(s) }
-    const del = document.createElement("button")
-    del.className = "op danger"
-    del.textContent = "删除"
-    del.title = "删除会话"
-    del.onclick = (e) => { e.stopPropagation(); promptDelete(s) }
-    ops.appendChild(ren)
-    ops.appendChild(del)
-    row.appendChild(t)
-    row.appendChild(ts)
-    row.appendChild(ops)
-    row.onclick = () => vscode.postMessage({ type: "resume", sessionId: s.id, directory: s.dir })
-    sess.appendChild(row)
+    sess.appendChild(sessItem(s))
   })
 }
 
-let opsArmed = { t: 0, id: null }
+function subTitle(t) {
+  const v = String(t || "").replace(/\s*\(@[^)]*subagent\)\s*$/i, "").trim()
+  return v || "(无标题)"
+}
 
-function promptDelete(s) {
-  const now = Date.now()
-  if (opsArmed.id !== "del:" + s.id || now - opsArmed.t > 2500) {
-    opsArmed = { t: now, id: "del:" + s.id }
-    vscode.postMessage({ type: "ops:toast", text: "再次点击「删除」确认删除该会话" })
+function agentTag(name, kind) {
+  const s = document.createElement("span")
+  s.className = "agtag " + (kind === "mgr" ? "mgr" : "sub")
+  s.textContent = "@" + (name || "subagent")
+  s.title = (kind === "mgr" ? "管理 Agent：" : "Subagent：") + (name || "subagent")
+  return s
+}
+
+function renderAgent(list) {
+  if (!list || !list.length) {
+    sess.innerHTML = '<div id="empty">还没有 Agent 群组 —— 使用 subagent 后会出现在这里</div>'
     return
   }
-  opsArmed = { t: 0, id: null }
-  vscode.postMessage({ type: "session:delete", sessionId: s.id })
-}
+  const groups = []
+  const byParent = new Map()
+  for (const it of list) {
+    const key = it.parentId || "(未知管理会话)"
+    let g = byParent.get(key)
+    if (!g) {
+      g = {
+        key: it.parentId || "",
+        title: it.parentTitle || "(未知管理会话)",
+        dir: it.parentDir || "",
+        agent: it.parentAgent || "",
+        items: []
+      }
+      byParent.set(key, g)
+      groups.push(g)
+    }
+    g.items.push(it)
+  }
+  sess.innerHTML = ""
+  groups.forEach((g) => {
+    const wrap = document.createElement("div")
+    wrap.className = "agroup"
 
-function promptRename(s) {
-  vscode.postMessage({ type: "session:renamePrompt", sessionId: s.id, current: (s.title || "").trim() })
-}
+    const head = document.createElement("button")
+    head.className = "aghead"
+    const ht = document.createElement("span")
+    ht.className = "agt"
+    ht.textContent = g.title
+    const hc = document.createElement("span")
+    hc.className = "agc"
+    hc.textContent = g.items.length + " 个 Subagent"
+    head.appendChild(ht)
+    head.appendChild(hc)
+    if (g.agent) head.appendChild(agentTag(g.agent, "mgr"))
+    head.title = g.key ? ("管理会话 · " + g.key) : "管理会话未知"
+    if (g.key) {
+      head.onclick = () => vscode.postMessage({ type: "resume", sessionId: g.key, directory: g.dir })
+    }
+    wrap.appendChild(head)
 
-function copyClipboard(text) {
-  try {
-    const ta = document.createElement("textarea")
-    ta.value = String(text || "")
-    ta.style.position = "fixed"
-    ta.style.opacity = "0"
-    document.body.appendChild(ta)
-    ta.select()
-    ta.setSelectionRange(0, ta.value.length)
-    document.execCommand("copy")
-    document.body.removeChild(ta)
-  } catch {}
+    g.items.forEach((it) => {
+      const row = document.createElement("div")
+      row.className = "aitem"
+      const main = document.createElement("button")
+      main.className = "aimain"
+      const t = document.createElement("span")
+      t.className = "at"
+      t.textContent = subTitle(it.title)
+      const ts = document.createElement("span")
+      ts.className = "ats"
+      ts.textContent = fmt(it.time)
+      main.appendChild(t)
+      main.appendChild(ts)
+      main.title = (it.dir || "") + " · " + it.id
+      main.onclick = () => vscode.postMessage({ type: "resume", sessionId: it.id, directory: it.dir })
+      row.appendChild(main)
+      row.appendChild(agentTag(it.agent || "subagent", "sub"))
+      wrap.appendChild(row)
+    })
+
+    sess.appendChild(wrap)
+  })
 }
 
 let kpSessionId = null
@@ -1458,11 +1850,10 @@ function renderKp(list) {
     ks.textContent = k.summary || ""
     b.appendChild(kn)
     b.appendChild(ks)
-    b.title = "点击把该知识点填入会话输入框并复制到剪贴板"
-    b.onclick = async () => {
+    b.title = "点击把该知识点填入会话输入框"
+    b.onclick = () => {
       const text = (k.name || "知识点 " + (idx + 1)) + "：" + (k.summary || "")
-      copyClipboard(text)
-      sess.innerHTML = '<div id="empty">✓ 已复制到剪贴板并填入会话输入框，回车即可发出</div>'
+      sess.innerHTML = '<div id="empty">已发送 → 填入会话输入框，回车即可发出</div>'
       vscode.postMessage({ type: "kp:input", sessionId: kpSessionId, directory: kpSessionDir, text: text })
       setTimeout(() => { if (getActiveTab() === "kp") renderKp(kpList) }, 2500)
     }
@@ -1471,12 +1862,12 @@ function renderKp(list) {
 }
 
 function getActiveTab() {
-  const tabSess = document.getElementById("tabSess")
-  const tabKp = document.getElementById("tabKp")
-  const tabNotes = document.getElementById("tabNotes")
-  if (tabKp && tabKp.classList.contains("act")) return "kp"
-  if (tabNotes && tabNotes.classList.contains("act")) return "notes"
-  return "sess"
+  return activeTab
+}
+
+// 只在对应页签处于激活状态时才允许改动 #sess，避免迟到的回包把别的页签内容冲掉
+function isTab(which) {
+  return activeTab === which
 }
 
 // ---------- 用户笔记 ----------
@@ -1629,12 +2020,17 @@ function renderNotes() {
 }
 
 function showTab(which) {
+  const prevTab = activeTab
+  activeTab = which
   const tabSess = document.getElementById("tabSess")
   const tabKp = document.getElementById("tabKp")
   const tabNotes = document.getElementById("tabNotes")
+  const tabAgent = document.getElementById("tabAgent")
   tabSess.classList.toggle("act", which === "sess")
   tabKp.classList.toggle("act", which === "kp")
   tabNotes.classList.toggle("act", which === "notes")
+  tabAgent.classList.toggle("act", which === "agent")
+  sessFlash("", false)
   if (which === "kp") {
     const sid = list.length ? list[0].id : null
     const dir = list.length ? list[0].dir : null
@@ -1642,24 +2038,42 @@ function showTab(which) {
       renderKp(kpList)
     } else {
       sess.innerHTML = '<div id="empty">正在用 AI 提取关键内容…</div>'
-      vscode.postMessage({ type: "kp:load", sessionId: sid, directory: dir })
+      const seq = ++kpSeq
+      vscode.postMessage({ type: "kp:load", sessionId: sid, directory: dir, seq })
     }
   } else if (which === "notes") {
     if (noteListLoaded) {
       renderNotes()
     } else {
       sess.innerHTML = '<div id="empty">正在加载用户笔记…</div>'
-      vscode.postMessage({ type: "notes:load" })
+      const seq = ++notesSeq
+      vscode.postMessage({ type: "notes:load", seq })
+    }
+  } else if (which === "agent") {
+    const reclick = prevTab === "agent"
+    if (agentLoaded && !reclick) {
+      renderAgent(agentList)
+    } else {
+      sess.innerHTML = '<div id="empty">正在加载 Agent 群组…</div>'
+      const seq = ++agentSeq
+      vscode.postMessage({ type: "agent:load", seq })
     }
   } else {
-    sess.innerHTML = '<div id="empty">正在加载历史对话…</div>'
-    vscode.postMessage({ type: "sessions:request" })
+    const reclick = prevTab === "sess"
+    if (sessionsLoaded && list.length && !reclick) {
+      render(list)
+    } else {
+      sess.innerHTML = '<div id="empty">正在加载历史对话…</div>'
+      const seq = ++sessSeq
+      vscode.postMessage({ type: "sessions:request", seq })
+    }
   }
 }
 
 document.getElementById("tabSess").onclick = () => showTab("sess")
 document.getElementById("tabKp").onclick = () => showTab("kp")
 document.getElementById("tabNotes").onclick = () => showTab("notes")
+document.getElementById("tabAgent").onclick = () => showTab("agent")
 
 render(list)
 show()
@@ -1669,15 +2083,14 @@ show()
 }
 
 async function finalizeHtml(panel) {
-  const [mediaFiles, sessions, status, audioFiles, models] = await Promise.all([
+  const [mediaFiles, sessions, status, audioFiles] = await Promise.all([
     Promise.resolve(collectMedia()),
     querySessions(),
     queryStatus(),
-    Promise.resolve(collectAudio()),
-    queryModels()
+    Promise.resolve(collectAudio())
   ])
   if (panel && panel.webview) {
-    panel.webview.html = buildHtml(panel.webview, mediaFiles, sessions, status, audioFiles, models)
+    panel.webview.html = buildHtml(panel.webview, mediaFiles, sessions, status, audioFiles)
   }
 }
 
@@ -1724,17 +2137,45 @@ async function openPanel() {
       try {
         ss = await querySessions()
       } catch {}
-      panel.webview.postMessage({ type: "sessions", items: mapSessions(ss) })
-    } else if (msg.type === "models:request") {
-      let list = []
+      panel.webview.postMessage({ type: "sessions", items: mapSessions(ss), seq: msg.seq })
+    } else if (msg.type === "agent:load") {
+      let ss = []
       try {
-        list = await queryModels()
+        ss = await queryAgentSessions()
       } catch {}
-      panel.webview.postMessage({ type: "models", list })
+      panel.webview.postMessage({ type: "agent:data", items: mapSessions(ss), seq: msg.seq })
+    } else if (msg.type === "sess:rename") {
+      try {
+        const title = await renameSession(msg.sessionId, msg.title)
+        panel.webview.postMessage({ type: "sess:done", op: "rename", sessionId: msg.sessionId, title, ok: true })
+      } catch (e) {
+        panel.webview.postMessage({
+          type: "sess:done", op: "rename", sessionId: msg.sessionId, ok: false,
+          error: ((e && e.message) || "重命名失败").split(/\r?\n/)[0]
+        })
+      }
+    } else if (msg.type === "sess:delete") {
+      try {
+        await deleteSession(msg.sessionId)
+        panel.webview.postMessage({ type: "sess:done", op: "delete", sessionId: msg.sessionId, ok: true })
+      } catch (e) {
+        panel.webview.postMessage({
+          type: "sess:done", op: "delete", sessionId: msg.sessionId, ok: false,
+          error: ((e && e.message) || "删除失败").split(/\r?\n/)[0]
+        })
+      }
     } else if (msg.type === "resume") {
       resumeSession(msg.sessionId, msg.directory)
-    } else if (msg.type === "session:new") {
-      startNewSession(msg.directory)
+    } else if (msg.type === "sess:new") {
+      try {
+        await newSession()
+        panel.webview.postMessage({ type: "sess:newed", ok: true })
+      } catch (e) {
+        panel.webview.postMessage({
+          type: "sess:newed", ok: false,
+          error: ((e && e.message) || "开启失败").split(/\r?\n/)[0]
+        })
+      }
     } else if (msg.type === "kp:load") {
       let sessions = []
       try {
@@ -1742,54 +2183,30 @@ async function openPanel() {
       } catch {}
       const cur = sessions && sessions.length ? sessions[0] : null
       if (!cur) {
-        panel.webview.postMessage({ type: "kp:err", text: "暂无会话可分析" })
+        panel.webview.postMessage({ type: "kp:err", text: "暂无会话可分析", seq: msg.seq })
         return
       }
       const sid = (msg.sessionId && sessions.some((s) => s.id === msg.sessionId)) ? msg.sessionId : cur.id
       const dir = msg.directory || cur.directory || null
       try {
         const list = await loadKeyPoints(sid, dir)
-        panel.webview.postMessage({ type: "kp:data", list, sessionId: sid, directory: dir })
+        panel.webview.postMessage({ type: "kp:data", list, sessionId: sid, directory: dir, seq: msg.seq })
       } catch (e) {
-        panel.webview.postMessage({ type: "kp:err", text: "AI 提取失败：" + ((e && e.message) || "未知") })
+        panel.webview.postMessage({ type: "kp:err", text: "AI 提取失败：" + ((e && e.message) || "未知"), seq: msg.seq })
       }
     } else if (msg.type === "kp:input") {
       inputToSession(msg.sessionId, msg.directory, msg.text)
-    } else if (msg.type === "session:rename") {
+    } else if (msg.type === "model:list") {
       try {
-        const title = String(msg.title || "").trim().replace(/'/g, "''")
-        if (title) {
-          await runDb("UPDATE session SET title='" + title + "' WHERE id='" + msg.sessionId + "'")
-          panel.webview.postMessage({ type: "session:renamed", sessionId: msg.sessionId, title })
-        }
+        const list = await listModels()
+        panel.webview.postMessage({ type: "model:data", list })
       } catch (e) {
-        panel.webview.postMessage({ type: "ops:err", text: (e && e.message) || "重命名失败" })
-      }
-    } else if (msg.type === "session:renamePrompt") {
-      const result = await vscode.window.showInputBox({
-        prompt: "重命名会话",
-        value: msg.current || "",
-        placeHolder: "输入新标题",
-        title: "重命名会话 " + String(msg.sessionId || "").slice(-8)
-      })
-      if (typeof result === "string" && result.trim() && result.trim() !== (msg.current || "")) {
-        panel.webview.postMessage({ type: "session:rename", sessionId: msg.sessionId, title: result.trim() })
-      }
-    } else if (msg.type === "session:delete") {
-      try {
-        await execFileAsync(OPENCODE_EXE, ["session", "delete", msg.sessionId], { timeout: 15000, windowsHide: true })
-        panel.webview.postMessage({ type: "session:deleted", sessionId: msg.sessionId })
-      } catch (e) {
-        panel.webview.postMessage({ type: "ops:err", text: (e && e.message) || "删除失败" })
+        panel.webview.postMessage({ type: "model:msg", text: "读取模型列表失败：" + ((e && e.message) || "未知"), isErr: true })
       }
     } else if (msg.type === "notes:load") {
-      panel.webview.postMessage({ type: "notes:data", notes: notesLoad() })
+        panel.webview.postMessage({ type: "notes:data", notes: notesLoad(), seq: msg.seq })
     } else if (msg.type === "notes:save") {
       notesSave(msg.notes)
-    } else if (msg.type === "ncm:stateSave") {
-      ncmStateSave(msg.state || {})
-    } else if (msg.type === "ncm:stateLoad") {
-      panel.webview.postMessage({ type: "ncm:state", state: ncmStateLoad() })
     } else if (msg.type === "ncm:status") {
       if (!ncm) {
         panel.webview.postMessage({ type: "ncm:msg", text: "网易云模块缺失（NeteaseCloudMusicApi 未安装）", isErr: true })
@@ -1855,16 +2272,107 @@ async function openPanel() {
   pushStatus()
 }
 
-const shell = /(powershell|pwsh)\.exe$/i.test(String(vscode.env.shell || ""))
-  ? "pwsh"
-  : /cmd\.exe$/i.test(String(vscode.env.shell || ""))
-    ? "cmd"
-    : "other"
+function detectShell() {
+  const s = String(vscode.env.shell || "").toLowerCase()
+  if (/pwsh|powershell/.test(s)) return "pwsh"
+  if (/cmd(\.exe)?/.test(s)) return "cmd"
+  if (/bash|zsh|fish|wsl|sh\.exe/.test(s)) return "other"
+  return isWin ? "pwsh" : "other"
+}
+
+const shell = detectShell()
 
 function resumeCommand(sessionId, port) {
   const exe = '"' + OPENCODE_EXE.replace(/\\/g, "/") + '"'
   const args = " --session " + sessionId + " --port " + port
   return shell === "pwsh" ? "& " + exe + args : exe + args
+}
+
+function newSessionCommand(port) {
+  const exe = '"' + OPENCODE_EXE.replace(/\\/g, "/") + '"'
+  const args = " --port " + port
+  return shell === "pwsh" ? "& " + exe + args : exe + args
+}
+
+function parseModelVerbose(stdout) {
+  const lines = String(stdout).split(/\r?\n/)
+  const out = []
+  for (let i = 0; i < lines.length; i++) {
+    const head = lines[i].trim()
+    if (!head || head.startsWith("{") || head === "}") continue
+    if (head.indexOf("/") <= 0) continue
+    let j = i + 1
+    while (j < lines.length && !lines[j].trim()) j++
+    if (lines[j] === undefined || lines[j].trim() !== "{") continue
+    let depth = 0
+    const buf = []
+    for (let k = j; k < lines.length; k++) {
+    buf.push(lines[k])
+    for (const ch of lines[k]) { if (ch === "{") depth++; else if (ch === "}") depth-- }
+    if (depth === 0) break
+    }
+    let obj = null
+    try { obj = JSON.parse(buf.join("\n")) } catch (e) { obj = null }
+    const s = head.indexOf("/")
+    const cap = (obj && obj.capabilities) || {}
+    const inp = cap.input || {}
+    out.push({
+      provider: head.slice(0, s),
+      model: head.slice(s + 1),
+      label: head,
+      name: (obj && obj.name) || "",
+      vision: !!(inp.image || inp.video || inp.pdf),
+      image: !!inp.image,
+      video: !!inp.video,
+      pdf: !!inp.pdf,
+      reasoning: !!cap.reasoning,
+      toolcall: !!(cap.toolcall || cap.attachment),
+      context: (obj && obj.limit && obj.limit.context) || 0
+    })
+    i = j + buf.length - 1
+  }
+  return out
+}
+
+function parseModelPlain(stdout) {
+  return String(stdout)
+  .split(/\r?\n/)
+  .map((l) => l.trim())
+  .filter(Boolean)
+  .map((line) => {
+  const i = line.indexOf("/")
+  const provider = i > 0 ? line.slice(0, i) : "opencode"
+  const model = i > 0 ? line.slice(i + 1) : line
+  return { provider, model, label: line, name: line.slice(line.lastIndexOf("/") + 1), vision: false, image: false, video: false, pdf: false, reasoning: false, toolcall: false, context: 0 }
+  })
+}
+
+async function listModels() {
+  if (modelListCache.t && Date.now() - modelListCache.t < 60e3 && modelListCache.value) {
+  return modelListCache.value
+  }
+  let list = []
+  try {
+  const { stdout } = await execFileAsync(
+  OPENCODE_EXE,
+  ["models", "--verbose"],
+  { timeout: 20000, windowsHide: true, maxBuffer: 32 * 1024 * 1024 }
+  )
+  list = parseModelVerbose(stdout)
+  } catch (e) {
+  list = []
+  }
+  if (!list.length) {
+  try {
+  const { stdout } = await execFileAsync(OPENCODE_EXE, ["models"], { timeout: 15000, windowsHide: true })
+  list = parseModelPlain(stdout)
+  } catch (e2) {
+  list = []
+  }
+  }
+  list.sort((a, b) => (b.vision ? 1 : 0) - (a.vision ? 1 : 0) || a.label.localeCompare(b.label))
+  modelListCache = { t: Date.now(), value: list }
+  return list
 }
 
 async function findOpencodeTerminal(sessionId) {
@@ -1907,7 +2415,8 @@ async function resumeSession(sessionId, directory) {
   return port
 }
 
-function startNewSession(directory) {
+async function newSession() {
+  const port = 30000 + Math.floor(Math.random() * 20000)
   if (!panel) openPanel()
   const cols = vscode.window.tabGroups.all
     .map((g) => g.viewColumn)
@@ -1915,21 +2424,20 @@ function startNewSession(directory) {
   const panelCol = panel && panel.viewColumn ? panel.viewColumn : null
   const rightMost = cols.length ? Math.max.apply(null, cols) : 1
   const opencodeCol = panelCol != null && panelCol > 1 ? panelCol - 1 : rightMost + 1
-  const port = 30000 + Math.floor(Math.random() * 20000)
-  const exe = '"' + OPENCODE_EXE.replace(/\\/g, "/") + '"'
-  const cmd = (shell === "pwsh" ? "& " : "") + exe + " --port " + port
+  const ws = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0]
   const term = vscode.window.createTerminal({
     name: "opencode new",
-    cwd: directory || (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0].uri.fsPath),
+    cwd: ws ? ws.uri.fsPath : undefined,
     location: { viewColumn: opencodeCol }
   })
-  term.sendText(cmd)
+  term.sendText(newSessionCommand(port))
   term.show()
   reconcile()
   return port
 }
 
-async function isOpencodeTerminal(t, sessionId) {  if (/opencode/i.test(t.name || "")) return true
+async function isOpencodeTerminal(t, sessionId) {
+  if (/opencode/i.test(t.name || "")) return true
   try {
     const pid = await t.processId
     if (!pid) return false
