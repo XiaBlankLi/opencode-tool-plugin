@@ -730,7 +730,6 @@ body.ncmMode #ncmWrap { display: flex; }
 #head .tab { background: #3a3d41; color: #fff; border: 1px solid transparent; border-radius: 4px; padding: 2px 10px; cursor: pointer; font-size: 11px; box-sizing: border-box; }
 #head .tab.act { background: #3f8f5f; border: 1px solid #2f6b46; }
 #head .reload { margin-left: auto; background: none; border: none; color: #8be9c6; cursor: pointer; font-size: 14px; }
-#head .htitle { color: #8be9c6; font-weight: bold; font-size: 11px; letter-spacing: 1px; flex: 0 0 auto; }
 .area { display: flex; flex-direction: column; flex: 0 1 auto; min-height: 36px; overflow: hidden; }
 .area > .ahead { display: flex; align-items: center; gap: 6px; padding: 3px 8px; background: #16161a; border-bottom: 1px solid #2f2f33; cursor: pointer; user-select: none; font-size: 11px; color: #8be9c6; letter-spacing: 1px; flex: 0 0 auto; }
 .area > .ahead .atitle { flex: 1; font-weight: bold; }
@@ -746,11 +745,8 @@ body.ncmMode #ncmWrap { display: flex; }
 .resizing { user-select: none; }
 #tabArea { flex: 1 1 auto; min-height: 120px; overflow: hidden; display: flex; flex-direction: column; }
 #tabArea.collapsed { flex: 0 0 auto; }
-#tabArea.collapsed #sessMsg, #tabArea.collapsed #sess { display: none; }
 #head .tab { user-select: none; }
 #head .tab.dragging { opacity: .4; }
-#tabCollapse { background: none; border: none; color: #8be9c6; cursor: pointer; font-size: 14px; padding: 0 4px; }
-#tabArea.collapsed #tabCollapse { transform: rotate(-90deg); }
 #newSessRow { padding: 6px 8px 2px; }
 #newSess { width: 100%; background: #2f6b46; border: 1px solid #3f8f5f; color: #fff; border-radius: 4px; padding: 5px 0; cursor: pointer; font-size: 12px; }
 #newSess:hover { background: #3f8f5f; }
@@ -932,21 +928,22 @@ body.ncmMode #ncmWrap { display: flex; }
 </div>
 </div>
 <div class="gutter" id="gutterStatus"></div>
-<div id="tabArea">
+<div id="tabArea" class="area">
+<div class="ahead" id="tabHead"><span class="atitle">☰ 功能栏</span><span class="achest">▾</span></div>
+<div class="abody" id="tabBody">
 <div id="newSessRow">
   <button id="newSess">＋ 开启新会话</button>
 </div>
 <div id="head">
-  <span id="tabTitle" class="htitle">☰ 功能栏</span>
   <button id="tabSess" class="tab act">历史对话</button>
   <button id="tabKp" class="tab">关键内容</button>
   <button id="tabNotes" class="tab">用户笔记</button>
   <button id="tabAgent" class="tab">Agent群组</button>
   <span><button class="reload" id="reload">↻ 刷新</button></span>
-  <button id="tabCollapse" title="折叠/展开内容区">▾</button>
 </div>
 <div id="sessMsg"></div>
 <div id="sess"><div id="empty">加载中…</div></div>
+</div>
 </div>
 <script>
 const vscode = acquireVsCodeApi()
@@ -1647,20 +1644,9 @@ document.getElementById("reload").onclick = () => vscode.postMessage({ type: "re
 
   setupCollapse(mediaArea, "ocMediaCollapsed")
   setupCollapse(statusArea, "ocStatusCollapsed")
+  setupCollapse(tabArea, "ocTabCollapsed")
   setupResize(mediaArea, document.getElementById("gutterMedia"), statusArea)
   setupResize(statusArea, document.getElementById("gutterStatus"), mediaArea)
-
-  const tabBtn = document.getElementById("tabCollapse")
-  let tabCollapsed = false
-  try { tabCollapsed = localStorage.getItem("ocTabCollapsed") === "1" } catch {}
-  const applyTab = (c) => {
-    tabArea.classList.toggle("collapsed", c)
-    tabBtn.textContent = c ? "▸" : "▾"
-    tabBtn.title = c ? "展开内容区" : "折叠内容区"
-    try { localStorage.setItem("ocTabCollapsed", c ? "1" : "0") } catch {}
-  }
-  tabBtn.addEventListener("click", () => { tabCollapsed = !tabCollapsed; applyTab(tabCollapsed) })
-  applyTab(tabCollapsed)
 
   const head = document.getElementById("head")
   const reloadSpan = document.getElementById("reload").parentElement
