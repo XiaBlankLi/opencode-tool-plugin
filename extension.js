@@ -738,6 +738,7 @@ body.ncmMode #ncmWrap { display: flex; }
 .area > .abody { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
 .area.collapsed { flex: 0 0 auto; }
 .area.collapsed > .abody { display: none; }
+.area.collapsed + .gutter { display: none; }
 .gutter { flex: 0 0 6px; cursor: row-resize; background: #141418; border-top: 1px solid #2a2a2e; border-bottom: 1px solid #2a2a2e; position: relative; }
 .gutter::after { content: ""; position: absolute; left: 50%; top: 50%; width: 24px; height: 2px; margin: -1px 0 0 -12px; background: #3a3d41; border-radius: 1px; }
 .gutter:hover, .gutter.drag { background: #3f8f5f; }
