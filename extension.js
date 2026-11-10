@@ -16,6 +16,8 @@ const EXT_DIR = __dirname
 const MEDIA_DIR = path.join(EXT_DIR, "media")
 const execFileSync2 = require("child_process").execFileSync
 const isWin = process.platform === "win32"
+let extContext = null
+let awaitingRestore = false
 
 function deduceCandidates() {
   const list = []
@@ -948,6 +950,7 @@ body.ncmMode #ncmWrap { display: flex; }
 </div>
 <script>
 const vscode = acquireVsCodeApi()
+try { vscode.setState(Object.assign({}, vscode.getState() || {}, { alive: true })) } catch {}
 const media = ${mediaJson}
 let list = ${listJson}
 let activeTab = "sess"
@@ -2242,16 +2245,27 @@ async function openPanel() {
     panel.reveal(undefined, true)
     return
   }
-  const cols = vscode.window.tabGroups.all
+  const groups = vscode.window.tabGroups.all
+  const cols = groups
     .map((g) => g.viewColumn)
     .filter((c) => c && c > 0)
   const rightMost = cols.length ? Math.max.apply(null, cols) : 1
-  panel = vscode.window.createWebviewPanel(
+  const rightGroup = groups.find((g) => g.viewColumn === rightMost)
+  const targetCol = rightGroup && rightGroup.tabs && rightGroup.tabs.length === 0 ? rightMost : rightMost + 1
+  const p = vscode.window.createWebviewPanel(
     "miku.sidebar",
     "OpenCode工具插件",
-    { viewColumn: rightMost + 1 },
+    { viewColumn: targetCol },
     { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [vscode.Uri.file(MEDIA_DIR)] }
   )
+  await setupPanel(p)
+}
+
+async function setupPanel(p) {
+  panel = p
+  awaitingRestore = false
+  try { panel.webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.file(MEDIA_DIR)] } } catch {}
+  try { if (extContext) extContext.globalState.update("panelWasOpen", true) } catch {}
   panel.iconPath = vscode.Uri.file(path.join(MEDIA_DIR, "icon.svg"))
   panel.webview.onDidReceiveMessage(async (msg) => {
     if (msg.type === "refresh") {
@@ -2388,6 +2402,7 @@ async function openPanel() {
   })
   panel.onDidDispose(() => {
     panel = null
+    try { if (extContext) extContext.globalState.update("panelWasOpen", false) } catch {}
     stopStatusTimer()
     stopQrPoll()
     ncmQrKey = null
@@ -2585,7 +2600,7 @@ async function isOpencodeTerminal(t, sessionId) {
 async function reconcile() {
   const list = vscode.window.terminals
   const results = await Promise.all(list.map(isOpencodeTerminal))
-  if (results.some(Boolean) && !panel) openPanel()
+  if (results.some(Boolean) && !panel && !awaitingRestore) openPanel()
 }
 
 function scheduleReconcile() {
@@ -2594,12 +2609,25 @@ function scheduleReconcile() {
 }
 
 function activate(context) {
+  extContext = context
   context.subscriptions.push(
     vscode.commands.registerCommand("miku.openRight", openPanel),
     vscode.window.onDidOpenTerminal(scheduleReconcile),
-    vscode.window.onDidCloseTerminal(scheduleReconcile)
+    vscode.window.onDidCloseTerminal(scheduleReconcile),
+    vscode.window.registerWebviewPanelSerializer("miku.sidebar", {
+      async deserializeWebviewPanel(webviewPanel) {
+        await setupPanel(webviewPanel)
+      }
+    })
   )
-  openPanel()
+  let wasOpen = false
+  try { wasOpen = !!context.globalState.get("panelWasOpen", false) } catch {}
+  awaitingRestore = wasOpen
+  if (wasOpen) {
+    setTimeout(() => { if (!panel) { awaitingRestore = false; openPanel() } }, 2500)
+  } else {
+    openPanel()
+  }
   scheduleReconcile()
 }
 
