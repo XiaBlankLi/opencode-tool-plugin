@@ -730,6 +730,7 @@ body.ncmMode #ncmWrap { display: flex; }
 #head .tab { background: #3a3d41; color: #fff; border: 1px solid transparent; border-radius: 4px; padding: 2px 10px; cursor: pointer; font-size: 11px; box-sizing: border-box; }
 #head .tab.act { background: #3f8f5f; border: 1px solid #2f6b46; }
 #head .reload { margin-left: auto; background: none; border: none; color: #8be9c6; cursor: pointer; font-size: 14px; }
+#head .htitle { color: #8be9c6; font-weight: bold; font-size: 11px; letter-spacing: 1px; flex: 0 0 auto; }
 .area { display: flex; flex-direction: column; flex: 0 1 auto; min-height: 36px; overflow: hidden; }
 .area > .ahead { display: flex; align-items: center; gap: 6px; padding: 3px 8px; background: #16161a; border-bottom: 1px solid #2f2f33; cursor: pointer; user-select: none; font-size: 11px; color: #8be9c6; letter-spacing: 1px; flex: 0 0 auto; }
 .area > .ahead .atitle { flex: 1; font-weight: bold; }
@@ -936,6 +937,7 @@ body.ncmMode #ncmWrap { display: flex; }
   <button id="newSess">＋ 开启新会话</button>
 </div>
 <div id="head">
+  <span id="tabTitle" class="htitle">☰ 功能栏</span>
   <button id="tabSess" class="tab act">历史对话</button>
   <button id="tabKp" class="tab">关键内容</button>
   <button id="tabNotes" class="tab">用户笔记</button>
@@ -1661,7 +1663,7 @@ document.getElementById("reload").onclick = () => vscode.postMessage({ type: "re
   applyTab(tabCollapsed)
 
   const head = document.getElementById("head")
-  const reloadSpan = head.querySelector("span")
+  const reloadSpan = document.getElementById("reload").parentElement
   const tabEls = Array.from(head.querySelectorAll(".tab"))
   let order = []
   try { order = JSON.parse(localStorage.getItem("ocTabOrder") || "[]") } catch {}
